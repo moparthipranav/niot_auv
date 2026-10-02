@@ -101,9 +101,10 @@ class ApproachBuoy(py_trees.behaviour.Behaviour):
 
 class BuoySearchSweep(py_trees.behaviour.Behaviour):
     """Performs a search sweep pattern to locate the target buoy. This behavior is executed when the buoy is not visible, and it commands the AUV to perform a predefined search pattern."""
-    def __init__(self, cmd_publisher, name="BuoySearchSweep"):
+    def __init__(self, cmd_publisher, timeout_sec=10.0, name="BuoySearchSweep"):
         super().__init__(name)
         self.cmd_publisher = cmd_publisher
+        self.timeout_sec = timeout_sec
         self.start_time = None
 
     def initialise(self):
@@ -111,7 +112,7 @@ class BuoySearchSweep(py_trees.behaviour.Behaviour):
 
     def update(self):
         elapsed_time = time.time() - self.start_time  # Calculate the elapsed time since the start of the search sweep.
-        if elapsed_time < 10.0:  # Perform the search sweep for 10 seconds.
+        if elapsed_time < self.timeout_sec:
             twist = Twist()
             twist.linear.x = 0.2  # Move forward at a constant speed.
             twist.angular.z = 0.5  # Rotate to create a sweeping motion.

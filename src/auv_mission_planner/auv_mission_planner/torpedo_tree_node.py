@@ -28,7 +28,7 @@ def create_torpedo_tree(cmd_publisher, fire_publisher):
     align_seq.add_children([center_yaw, match_depth])
 
     approach_standoff = ApproachFiringStandOff(cmd_publisher, standoff_distance=0.90, name="ApproachFiringStandOff")
-    fire_actuator = FireTorpedoActuator(fire_publisher, pulse_duration=1.5, name="FireTorpedoActuator")
+    fire_actuator = FireTorpedoActuator(fire_publisher, duration=1.5, name="FireTorpedoActuator")
 
     strike_seq.add_children([is_target_detected, align_seq, approach_standoff, fire_actuator])
 

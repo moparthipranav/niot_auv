@@ -38,7 +38,7 @@ class CenterTorpedoYaw(py_trees.behaviour.Behaviour): # Update this behaviour fo
                 return Status.SUCCESS
 
             twist = Twist()
-            twist.angular.z = -0.05 * norm_x # P-control yaw alignment (Using the concept of a Proportional Controller where Kp = -0.05)
+            twist.angular.z = -0.55 * norm_x  # P-control yaw alignment, Kp = -0.55.
             self.cmd_pub.publish(twist)
             return Status.RUNNING
         except (KeyError, AttributeError, IndexError):  # Proper Error handling can be patched later
@@ -50,7 +50,7 @@ class CenterTorpedoYaw(py_trees.behaviour.Behaviour): # Update this behaviour fo
 class MatchTorpedoDepth(py_trees.behaviour.Behaviour):
     """Action node: Aligns vehicle depth (heave) with the target cutout elevation."""
     def __init__(self, cmd_publisher, deadband=0.4, name="MatchTorpedoDepth"):
-        super().__init__()
+        super().__init__(name)
         self.cmd_pub = cmd_publisher
         self.deadband = deadband
         self.blackboard = py_trees.blackboard.Client(name=self.name)

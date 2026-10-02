@@ -12,7 +12,6 @@ from auv_mission_planner.buoy_task_behaviors import (
     CenterBuoyPosition,
     MatchBuoyDepth,
     ApproachBuoy,
-    ContactBuoy,
 )
 
 def create_buoy_tree(cmd_publisher):
