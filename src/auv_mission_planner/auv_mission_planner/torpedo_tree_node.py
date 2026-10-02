@@ -45,7 +45,7 @@ class TorpedoMissionNode(rclpy.node.Node):
         super().__init__('torpedo_mission_node')
         
         # Actuator and Velocity Publishers
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_pub = self.create_publisher(Twist, '/control/requests/torpedo', 10)
         self.fire_pub = self.create_publisher(Bool, '/actuators/torpedo_fire', 10)
 
         # Build Behavior Tree

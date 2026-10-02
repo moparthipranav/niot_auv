@@ -54,7 +54,7 @@ class MatchTorpedoDepth(py_trees.behaviour.Behaviour):
         self.cmd_pub = cmd_publisher
         self.deadband = deadband
         self.blackboard = py_trees.blackboard.Client(name=self.name)
-        self.blackboad.register_key("target_pose", access=py_trees.common.Access.READ)
+        self.blackboard.register_key("torpedo_pose", access=py_trees.common.Access.READ)
 
     def update(self):
         try:
@@ -64,13 +64,13 @@ class MatchTorpedoDepth(py_trees.behaviour.Behaviour):
 
             twist = Twist()
             twist.linear.z = -0.4 * norm_y
-            self.cmd_pub.publisher(twist)
+            self.cmd_pub.publish(twist)
             return Status.RUNNING
         except (KeyError, AttributeError, IndexError):
             return Status.FAILURE
 
     def terminate(self, new_status):
-        self.cmd_pub.publisher(Twist())
+        self.cmd_pub.publish(Twist())
 
 class ApproachFiringStandOff(py_trees.behaviour.Behaviour):
     """Action node: Approaches the target until opimal firing stand-off distance is reached."""

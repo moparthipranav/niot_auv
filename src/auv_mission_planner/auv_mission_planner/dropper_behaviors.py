@@ -87,7 +87,7 @@ class DescendToDropAltitude(py_trees.behaviour.Behaviour):
 
             twist = Twist()
             twist.linear.z = -0.20 # Controlled descent heave
-            self.cmd_pub.publisher(twist)
+            self.cmd_pub.publish(twist)
             return Status.RUNNING
         except (KeyError, AttributeError, IndexError):
             return Status.FAILURE
@@ -105,7 +105,7 @@ class ReleasePayloadGripper(py_trees.behaviour.Behaviour):
 
     def initialise(self):
         self.start_time = time.time()
-        self.gripper_pub.publisher(Bool(data=True))
+        self.gripper_pub.publish(Bool(data=True))
 
     def update(self):
         elapsed = time.time() - self.start_time
@@ -117,7 +117,7 @@ class ReleasePayloadGripper(py_trees.behaviour.Behaviour):
         return Status.RUNNING
 
     def terminate(self, new_status):
-        self.gripper_pub.publisher(Bool(data=False))
+        self.gripper_pub.publish(Bool(data=False))
 
 class BinSearchSweep(py_trees.behaviour.Behaviour):
     """Action node: Rotational search pattern to find the bin using the bottom camera to locate the bin."""
@@ -141,4 +141,3 @@ class BinSearchSweep(py_trees.behaviour.Behaviour):
 
     def terminate(self, new_status):
         self.cmd_pub.publish(Twist())
-        

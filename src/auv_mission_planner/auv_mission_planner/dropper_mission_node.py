@@ -45,7 +45,7 @@ class DropperMissionNode(rclpy.node.Node):
         super().__init__('dropper_mission_node')
 
         # Publishers
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_pub = self.create_publisher(Twist, '/control/requests/dropper', 10)
         self.gripper_pub = self.create_publisher(Bool, '/actuators/gripper_open', 10)
 
         # Build Behavior Tree

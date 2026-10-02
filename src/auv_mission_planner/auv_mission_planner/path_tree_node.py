@@ -41,7 +41,7 @@ class PathMissionNode(rclpy.node.Node):
         super().__init__('path_mission_node')
         
         # Publishers
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_pub = self.create_publisher(Twist, '/control/requests/path', 10)
 
         # Build py_trees_ros Tree
         tree_root = create_path_tree(self.cmd_pub)

@@ -4,6 +4,7 @@ import py_trees
 import py_trees_ros
 from std_msgs.msg import Bool
 from geometry_msgs.msg import Twist
+from std_msgs.msg import Float32MultiArray
 
 from auv_mission_planner.gate_behaviors import (
     CheckGateDetected,
@@ -40,7 +41,7 @@ def create_gate_tree(cmd_publisher):
 class GateMissionNode(rclpy.node.Node):
     def __init__(self):
         super().__init__('gate_mission_node')
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_pub = self.create_publisher(Twist, '/control/requests/gate', 10)
 
         # Build py_trees_ros Behaviour Tree
         tree_root = create_gate_tree(self.cmd_pub)
@@ -62,8 +63,9 @@ class GateMissionNode(rclpy.node.Node):
         self.bb_gate_pose = py_trees_ros.subscribers.ToBlackboard(
             name="SubGatePose",
             topic_name="/vision/gate_pose",
+            topic_type=Float32MultiArray,
             qos_profile=qos_profile_system_default,
-            blackboard_varaibles={"gate_pose": None},
+            blackboard_variables={"gate_pose": None},
             clearing_policy=py_trees.common.ClearingPolicy.NEVER
         )
 

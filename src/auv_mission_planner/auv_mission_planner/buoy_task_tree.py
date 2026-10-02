@@ -45,7 +45,7 @@ class BuoyMissionNode(rclpy.node.Node):
         super().__init__('buoy_mission_node')
 
         # Publishers
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_pub = self.create_publisher(Twist, '/control/requests/buoy', 10)
 
         # Build py_trees_ros Tree
         tree_root = create_buoy_tree(self.cmd_pub)
@@ -81,5 +81,4 @@ class BuoyMissionNode(rclpy.node.Node):
 
     def tick_tree(self):
         self.tree.tick()  # Tick the behavior tree to update its state and execute behaviors based on the current conditions and blackboard data.
-
 
