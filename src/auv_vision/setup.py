@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'camera_publisher = auv_vision.camera_publisher:main',
             'object_detector = auv_vision.object_detector:main',
+            'inference_client = auv_vision.inference_client:main',
         ],
     },
 )

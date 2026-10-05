@@ -53,7 +53,7 @@ class TestTorpedoTreeBehaviour(unittest.TestCase):
     def test_centering_yaw_when_horizontal_offset_large(self):
         """Test: When cutout is off-center (|x| > 0.04 deadband), vehicle commands yaw correction."""
         self.bb.torpedo_found = Bool(data=True)
-        self.bb.torpedo_pose = Float32MultiArray(data=[0.3, 0.0, 2.0])
+        self.bb.torpedo_pose = Float32MultiArray(data=[0 .3, 0.0, 2.0])
 
         self.tree.tick()
 
