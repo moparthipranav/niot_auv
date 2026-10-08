@@ -11,10 +11,12 @@ class CameraPublisher(Node):
         super().__init__('camera_publisher')
         
         # Declare the parameters for the node to use
-        self.declare_parameter('video_source', 0)
+        self.declare_parameter('video_source', '0')
         self.declare_parameter('publish_rate', 30.0) # publishes 30 frames per second
 
         source = self.get_parameter('video_source').value
+        if source.isdecimal():
+            source = int(source)
         rate = self.get_parameter('publish_rate').value
 
         # Creating a publisher node on the topic '/camera/image_raw' with queue_size 10 which limits the amount of messages queued messages if the receiver is not accepting them
@@ -69,4 +71,3 @@ if __name__ == '__main__':
 
 
         
-

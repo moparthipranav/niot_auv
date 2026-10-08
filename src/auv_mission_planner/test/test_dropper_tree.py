@@ -1,8 +1,11 @@
 import unittest
+import time
 import py_trees
-from std_msgs.msg import Bool, Float32MultiArray
+from std_msgs.msg import Bool
 from geometry_msgs.msg import Twist
+from auv_interfaces.msg import BinDetection
 from auv_mission_planner.dropper_mission_node import create_dropper_tree
+
 
 class TestDropperTreeBehaviour(unittest.TestCase):
 
@@ -12,6 +15,7 @@ class TestDropperTreeBehaviour(unittest.TestCase):
 
         self.last_cmd = Twist()
         self.last_gripper = Bool(data=False)
+        self.gripper_history = []
 
         class MockCmdPublisher:
             def __init__(self, outer):
@@ -24,6 +28,7 @@ class TestDropperTreeBehaviour(unittest.TestCase):
                 self.outer = outer
             def publish(self, msg):
                 self.outer.last_gripper = msg
+                self.outer.gripper_history.append(msg.data)
 
         self.cmd_pub = MockCmdPublisher(self)
         self.gripper_pub = MockGripperPublisher(self)
@@ -32,8 +37,38 @@ class TestDropperTreeBehaviour(unittest.TestCase):
         self.tree = py_trees.trees.BehaviourTree(self.root)
 
         self.bb = py_trees.blackboard.Client(name="UnitTestClient")
-        self.bb.register_key(key="bin_found", access=py_trees.common.Access.WRITE)
-        self.bb.register_key(key="bin_pose", access=py_trees.common.Access.WRITE)
+        self.bb.register_key(
+            key="bin_detection", access=py_trees.common.Access.WRITE
+        )
+        self.bb.register_key(
+            key="vehicle_stable", access=py_trees.common.Access.WRITE
+        )
+        self.bb.register_key(
+            key="vehicle_stable_received_at",
+            access=py_trees.common.Access.WRITE
+        )
+
+    def set_detection(self, x=0.01, y=0.01, z=1.0, age=0.0,
+                      detected=True, marker_detected=True):
+        detection = BinDetection()
+        timestamp = time.time() - age
+        detection.header.stamp.sec = int(timestamp)
+        detection.header.stamp.nanosec = int(
+            (timestamp - int(timestamp)) * 1e9
+        )
+        detection.detected = detected
+        detection.marker_detected = marker_detected
+        detection.x = x
+        detection.y = y
+        detection.z = z
+        detection.yaw = 0.0
+        detection.confidence = 0.9
+        self.bb.bin_detection = detection
+        self.set_vehicle_stable(True)
+
+    def set_vehicle_stable(self, stable, age=0.0):
+        self.bb.vehicle_stable = stable
+        self.bb.vehicle_stable_received_at = time.time() - age
 
     def tearDown(self):
         """Runs after every individual test case."""
@@ -41,7 +76,7 @@ class TestDropperTreeBehaviour(unittest.TestCase):
 
     def test_search_fallback_when_bin_not_found(self):
         """Test: When bin is not detected, vehicle executes search yaw sweep."""
-        self.bb.bin_found = Bool(data=False)
+        self.set_detection(detected=False, marker_detected=False)
 
         self.tree.tick()
 
@@ -53,8 +88,7 @@ class TestDropperTreeBehaviour(unittest.TestCase):
     def test_sway_centering_when_lateral_offset_large(self):
         """Test: When bin is offset laterally (|x| > 0.05 deadband), vehicle commands sway."""
         # Arrange: norm_x = 0.4 (right), norm_y = 0.0, altitude_z = 1.0m
-        self.bb.bin_found = Bool(data=True)
-        self.bb.bin_pose = Float32MultiArray(data=[0.4, 0.0, 1.0])
+        self.set_detection(x=0.4, y=0.0)
 
         self.tree.tick()
 
@@ -66,8 +100,7 @@ class TestDropperTreeBehaviour(unittest.TestCase):
     def test_surge_centering_when_forward_offset_large(self):
         """Test: When sway is centered (|x| < 0.05) but surge is off, vehicle commands surge."""
         # Arrange: norm_x = 0.01 (centered), norm_y = 0.3 (ahead), altitude_z = 1.0m
-        self.bb.bin_found = Bool(data=True)
-        self.bb.bin_pose = Float32MultiArray(data=[0.01, 0.3, 1.0])
+        self.set_detection(x=0.01, y=0.3)
 
         self.tree.tick()
 
@@ -79,8 +112,7 @@ class TestDropperTreeBehaviour(unittest.TestCase):
     def test_descent_when_centered_and_high(self):
         """Test: When fully centered in XY but high (altitude > 0.40m), vehicle descends."""
         # Arrange: norm_x = 0.01, norm_y = 0.01, altitude_z = 0.90m
-        self.bb.bin_found = Bool(data=True)
-        self.bb.bin_pose = Float32MultiArray(data=[0.01, 0.01, 0.90])
+        self.set_detection(z=0.90)
 
         self.tree.tick()
 
@@ -88,20 +120,88 @@ class TestDropperTreeBehaviour(unittest.TestCase):
         self.assertAlmostEqual(self.last_cmd.linear.z, -0.20)
         self.assertFalse(self.last_gripper.data)
 
+    def test_realigns_when_marker_moves_during_descent(self):
+        self.set_detection(z=0.90)
+        self.tree.tick()
+        self.assertAlmostEqual(self.last_cmd.linear.z, -0.20)
+
+        self.set_detection(x=0.4, z=0.90)
+        self.tree.tick()
+
+        self.assertAlmostEqual(self.last_cmd.linear.y, -0.14)
+        self.assertAlmostEqual(self.last_cmd.linear.z, 0.0)
+
     def test_release_gripper_when_at_drop_altitude(self):
         """Test: When centered and at drop altitude (altitude <= 0.40m), open gripper."""
         # Arrange: norm_x = 0.01, norm_y = 0.01, altitude_z = 0.35m
-        self.bb.bin_found = Bool(data=True)
-        self.bb.bin_pose = Float32MultiArray(data=[0.01, 0.01, 0.35])
+        self.set_detection(z=0.35)
 
         self.tree.tick()
 
         self.assertEqual(self.root.status, py_trees.common.Status.RUNNING)
         self.assertTrue(self.last_gripper.data)
 
+    def test_invalid_range_does_not_release_gripper(self):
+        """A missing/invalid range must not trigger a payload release."""
+        self.set_detection(z=0.0)
+
+        self.tree.tick()
+
+        self.assertFalse(self.last_gripper.data)
+        self.assertAlmostEqual(self.last_cmd.angular.z, 0.25)
+
+    def test_payload_release_is_one_shot(self):
+        self.set_detection(z=0.35)
+        release_node = self.tree.root.children[0].children[4]
+        release_node.release_hold_time = 0.0
+
+        self.tree.tick()
+        self.tree.tick()
+
+        self.assertEqual(self.gripper_history.count(True), 1)
+        self.assertFalse(self.last_gripper.data)
+
+    def test_unstable_vehicle_holds_position_without_releasing(self):
+        self.set_detection(z=0.35)
+        self.set_vehicle_stable(False)
+
+        self.tree.tick()
+
+        self.assertEqual(self.root.status, py_trees.common.Status.RUNNING)
+        self.assertEqual(self.last_cmd, Twist())
+        self.assertFalse(self.last_gripper.data)
+
+    def test_stale_pose_stops_an_active_release_pulse(self):
+        self.set_detection(z=0.35)
+        release_node = self.tree.root.children[0].children[4]
+        release_node.release_hold_time = 10.0
+
+        self.tree.tick()
+        self.assertTrue(self.last_gripper.data)
+
+        detection = self.bb.bin_detection
+        detection.header.stamp.sec -= 2
+        self.bb.bin_detection = detection
+        self.tree.tick()
+
+        self.assertFalse(self.last_gripper.data)
+
+    def test_unstable_vehicle_stops_an_active_release_pulse(self):
+        self.set_detection(z=0.35)
+        release_node = self.tree.root.children[0].children[4]
+        release_node.release_hold_time = 10.0
+
+        self.tree.tick()
+        self.assertTrue(self.last_gripper.data)
+
+        self.set_vehicle_stable(False)
+        self.tree.tick()
+
+        self.assertFalse(self.last_gripper.data)
+
     def test_search_timeout_triggers_failure(self):
         """Test: If search sweep exceeds timeout limit, it returns FAILURE."""
-        self.bb.bin_found = Bool(data=False)
+        self.set_detection(detected=False, marker_detected=False)
         self.tree.tick()
 
         search_node = self.tree.root.children[1].children[0]
@@ -110,6 +210,24 @@ class TestDropperTreeBehaviour(unittest.TestCase):
         self.tree.tick()
 
         self.assertEqual(search_node.status, py_trees.common.Status.FAILURE)
+
+    def test_stale_detection_cannot_drive_or_release(self):
+        self.set_detection(x=0.4, z=0.35, age=2.0)
+
+        self.tree.tick()
+
+        self.assertAlmostEqual(self.last_cmd.angular.z, 0.25)
+        self.assertAlmostEqual(self.last_cmd.linear.y, 0.0)
+        self.assertFalse(self.last_gripper.data)
+
+    def test_bin_without_marker_does_not_align_or_release(self):
+        self.set_detection(x=0.4, z=0.35, marker_detected=False)
+
+        self.tree.tick()
+
+        self.assertAlmostEqual(self.last_cmd.angular.z, 0.25)
+        self.assertAlmostEqual(self.last_cmd.linear.y, 0.0)
+        self.assertFalse(self.last_gripper.data)
 
 if __name__ == '__main__':
     unittest.main()

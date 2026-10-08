@@ -1,6 +1,7 @@
 # The Object Detector node subscribes to the camera_publisher node to perform yolov11 object detection algorthim on the images. 
 
 import json
+import math
 import rclpy
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
@@ -53,6 +54,7 @@ class ObjectDetectionSubscriber(Node):
         self.declare_parameter('inference_timeout', 5.0)
         self.declare_parameter('jpeg_quality', 85)
         self.declare_parameter('real_buoy_width', 0.20) # Change this value later
+        self.declare_parameter('real_bin_width', 0.0)
         self.declare_parameter('fx', 620.5)
         self.declare_parameter('fy', 618.7)
         self.declare_parameter('cx', 320.0)
@@ -61,6 +63,7 @@ class ObjectDetectionSubscriber(Node):
         # Retrieve the parameter values
         real_buoy_width = self.get_parameter('real_buoy_width').value
         self.real_buoy_width = float(real_buoy_width)
+        self.real_bin_width = float(self.get_parameter('real_bin_width').value)
         fx = self.get_parameter('fx').value
         fy = self.get_parameter('fy').value
         cx = self.get_parameter('cx').value
@@ -68,6 +71,11 @@ class ObjectDetectionSubscriber(Node):
 
         # Initialize the Camera Coordinate Transform
         self.transform = CameraCoordinateTransformer(fx, fy, cx, cy)
+        if not math.isfinite(self.real_bin_width) or self.real_bin_width <= 0:
+            self.get_logger().warning(
+                'Set real_bin_width to publish a calibrated YOLO bin range; '
+                'classical bin measurements come from bin_detection.'
+            )
 
         # Initialize the cv bridge
         self.bridge = CvBridge()
@@ -171,7 +179,7 @@ class ObjectDetectionSubscriber(Node):
             remote_detections = self.inference_client.detect(cv_image)
         except (InferenceError, OSError, ValueError) as e:
             self.get_logger().error(f"YOLO inference server request failed: {e}")
-            return
+            remote_detections = []
         self.detections_publisher.publish(
             String(data=json.dumps(remote_detections))
         )
@@ -195,11 +203,6 @@ class ObjectDetectionSubscriber(Node):
             width_pixels = x2 - x1
             if width_pixels <= 0:
                 continue
-            depth = self.transform.estimate_depth(self.real_buoy_width, width_pixels)
-            X, Y, Z = self.transform.image_to_camera(u, v, depth)
-            norm_x = (u - frame_width / 2.0) / (frame_width / 2.0)
-            norm_y = (v - frame_height / 2.0) / (frame_height / 2.0)
-
             mission_object = next(
                 (
                     name for name, aliases in self.mission_class_names.items()
@@ -207,6 +210,20 @@ class ObjectDetectionSubscriber(Node):
                 ),
                 None,
             )
+            real_width = (
+                self.real_bin_width
+                if mission_object == 'bin'
+                else self.real_buoy_width
+            )
+            if not math.isfinite(real_width) or real_width <= 0:
+                continue
+            depth = self.transform.estimate_depth(real_width, width_pixels)
+            if not math.isfinite(depth) or depth <= 0:
+                continue
+            X, Y, Z = self.transform.image_to_camera(u, v, depth)
+            norm_x = (u - frame_width / 2.0) / (frame_width / 2.0)
+            norm_y = (v - frame_height / 2.0) / (frame_height / 2.0)
+
             if mission_object is not None and (
                 mission_object not in detections
                 or confidence > detections[mission_object][0]

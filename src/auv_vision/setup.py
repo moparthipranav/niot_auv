@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'camera_publisher = auv_vision.camera_publisher:main',
+            'bin_detection = auv_vision.bin_detection_node:main',
             'object_detector = auv_vision.object_detector:main',
             'inference_client = auv_vision.inference_client:main',
         ],

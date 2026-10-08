@@ -78,3 +78,89 @@ The wire format is a 4-byte unsigned network-order payload length followed by
 JPEG bytes. The response uses the same 4-byte length followed by UTF-8 JSON:
 an array of detections, each with `class_id`, `class_name`, `confidence`,
 `x1`, `y1`, `x2`, and `y2` (plus the optional tracking ID).
+
+## Test bin alignment and payload release
+
+The classical OpenCV detector is a separate ROS 2 node. It processes every
+`/camera/image_raw` frame and publishes one `auv_interfaces/msg/BinDetection`
+message to `/vision/bin_detection`, including explicit `detected` and
+`marker_detected` flags when either target is absent. `x` and `y` are normalized
+image offsets of the marker center (range -1 to 1), `z` is the estimated
+camera-to-bin range in metres, `yaw` is the bin's image-plane orientation in
+radians, and `confidence` is the marker classifier's vote confidence. The
+message header carries the camera measurement timestamp.
+
+Configure `bin_width` to the measured physical bin width and `fx` to the
+camera's calibrated horizontal focal length in pixels for the actual image
+size. The width-based range is approximate and assumes the bin's measured
+width is visible without substantial perspective foreshortening. Range is
+zero when calibration is missing or invalid; the mission tree can still
+observe the image offsets, but will not descend or release on an invalid range.
+The tree requires both the bin and marker to be detected, a
+confidence of at least 0.2, and a measurement no older than 0.75 seconds before
+issuing alignment, descent, or release commands.
+After reaching the configured drop range, it also waits for a recent
+`std_msgs/msg/Bool` on `/state/vehicle_stable`; false or missing/stale
+stability data keeps the vehicle stopped and prevents payload release. The
+stability publisher is a separate vehicle-state input and must be running for
+the mission to proceed to release.
+
+Build and source the ROS workspace on the Jetson, then run these commands in
+separate sourced terminals. Replace the example bin width with its measured
+value and use the correct camera index:
+
+```sh
+cd /path/to/niot_auv
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install --packages-up-to auv_vision auv_mission_planner
+source install/setup.bash
+```
+
+In separate terminals with the ROS workspace sourced:
+
+```sh
+ros2 run auv_vision camera_publisher --ros-args \
+  -p video_source:=/videos/test.mp4
+ros2 run auv_vision bin_detection --ros-args \
+  -p bin_width:=0.30 -p fx:=620.5
+ros2 run auv_mission_planner dropper_mission_node
+```
+
+First observe detections and requested motion without enabling the actuators:
+
+```sh
+ros2 topic echo /vision/bin_detection
+ros2 topic echo /control/requests/dropper
+ros2 run rqt_image_view rqt_image_view
+```
+
+The dropper tree searches when the bin or marker is not detected or the last
+measurement is stale, centers over the marker, descends to a 0.40 m measured
+range, then pulses `/actuators/gripper_open`. Release is one-shot. The tree
+publishes movement requests on `/control/requests/dropper` and the release
+command on `/actuators/gripper_open`; the reactive control layer must remain
+disabled until the commands have been observed and the vehicle is secured.
+
+If the reactive control layer is on the Raspberry Pi, run it there on the same
+ROS 2 domain and LAN, with the M64 modem parameters configured for the Pi's
+serial port. For example, in a sourced terminal on the Pi:
+
+```sh
+ros2 run auv_mission_planner reactive_control_layer --ros-args \
+  -p enabled:=false -p use_m64_modem:=true \
+  -p m64_port:=/dev/ttyUSB3
+```
+
+Use the Pi's actual modem port, do not start a second control layer on the
+Jetson, and confirm that the Pi receives `/control/requests/dropper` and
+`/actuators/gripper_open` before enabling it.
+
+For a physical test, secure the AUV and clear the actuator mechanism first.
+Start the reactive control layer disabled on the actuator computer. Stop the
+observer-only dropper node before enabling the controller; then publish enable
+from any ROS 2 terminal on the shared domain and launch one fresh dropper node:
+
+```sh
+ros2 topic pub --once /control/enable std_msgs/msg/Bool "{data: true}"
+ros2 run auv_mission_planner dropper_mission_node
+```
