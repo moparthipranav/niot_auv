@@ -107,6 +107,7 @@ def estimate_bin_detection(img, real_bin_width, fx):
     return {
         'detected': True,
         'marker_detected': label in ('X', 'O'),
+        'marker_label': label,
         'x': norm_x,
         'y': norm_y,
         'z': range_m,
@@ -115,6 +116,47 @@ def estimate_bin_detection(img, real_bin_width, fx):
         'bin_hull': bin_hull,
         'marker_hull': marker_hull,
     }
+
+
+def annotate_bin_detection(img, measurement):
+    """Return a copy of the image with the current bin detection overlaid."""
+    annotated = img.copy()
+    if measurement is None:
+        status = 'Bin: NOT DETECTED'
+        details = ''
+    else:
+        bin_hull = measurement['bin_hull']
+        marker_hull = measurement['marker_hull']
+        cv2.drawContours(annotated, [bin_hull], -1, (0, 255, 0), 2)
+        x, y, width, height = cv2.boundingRect(bin_hull)
+        cv2.rectangle(
+            annotated, (x, y), (x + width, y + height), (0, 255, 0), 2
+        )
+        if marker_hull is not None:
+            cv2.drawContours(annotated, [marker_hull], -1, (0, 0, 255), 2)
+
+        marker_label = measurement['marker_label']
+        if marker_label in ('X', 'O'):
+            status = f'Bin: DETECTED | Marker: {marker_label}'
+        else:
+            status = 'Bin: DETECTED | Marker: NOT DETECTED'
+        details = (
+            f"x: {measurement['x']:.2f}  y: {measurement['y']:.2f}  "
+            f"range: {measurement['z']:.2f} m  "
+            f"confidence: {measurement['confidence']:.2f}"
+        )
+
+    cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 54), (0, 0, 0), -1)
+    cv2.putText(
+        annotated, status, (10, 22), cv2.FONT_HERSHEY_SIMPLEX,
+        0.6, (0, 255, 255), 2, cv2.LINE_AA
+    )
+    if details:
+        cv2.putText(
+            annotated, details, (10, 46), cv2.FONT_HERSHEY_SIMPLEX,
+            0.5, (255, 255, 255), 1, cv2.LINE_AA
+        )
+    return annotated
 
 
 # ------------------------------------------------------------- marker ----

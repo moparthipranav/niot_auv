@@ -134,6 +134,11 @@ ros2 topic echo /control/requests/dropper
 ros2 run rqt_image_view rqt_image_view
 ```
 
+In `rqt_image_view`, select `/vision/bin_detection/debug_image` to see the live
+bin outline, marker outline/classification, and estimated offsets, range, and
+confidence. Frames where no bin is found are labeled accordingly. The image
+topic can be changed with the `debug_image_topic` parameter.
+
 The dropper tree searches when the bin or marker is not detected or the last
 measurement is stale, centers over the marker, descends to a 0.40 m measured
 range, then pulses `/actuators/gripper_open`. Release is one-shot. The tree
@@ -141,26 +146,30 @@ publishes movement requests on `/control/requests/dropper` and the release
 command on `/actuators/gripper_open`; the reactive control layer must remain
 disabled until the commands have been observed and the vehicle is secured.
 
-If the reactive control layer is on the Raspberry Pi, run it there on the same
-ROS 2 domain and LAN, with the M64 modem parameters configured for the Pi's
-serial port. For example, in a sourced terminal on the Pi:
+Run the reactive control layer on the computer whose UART is physically
+connected to the Raspberry Pi (the default `/dev/ttyTHS1` is a Jetson Nano
+UART). Start it disabled while checking the topic wiring:
 
 ```sh
 ros2 run auv_mission_planner reactive_control_layer --ros-args \
-  -p enabled:=false -p use_m64_modem:=true \
-  -p m64_port:=/dev/ttyUSB3
+  -p enabled:=false -p serial_port:=/dev/ttyTHS1 \
+  -p serial_baud:=115200
 ```
 
-Use the Pi's actual modem port, do not start a second control layer on the
-Jetson, and confirm that the Pi receives `/control/requests/dropper` and
-`/actuators/gripper_open` before enabling it.
+The controller subscribes to `/control/requests/dropper` and
+`/actuators/gripper_open`, publishes the selected command on
+`/control/selected_cmd_vel`, and transmits six-axis motion plus gripper state
+over UART. It starts disabled and sends stop frames until enabled. Configure
+`serial_port` and `serial_baud` for the actual connection. The Raspberry Pi
+receiver must decode the matching 16-byte `0xAA 0x55` frame; that receiver is
+outside this repository and has not been verified here.
 
 For a physical test, secure the AUV and clear the actuator mechanism first.
-Start the reactive control layer disabled on the actuator computer. Stop the
-observer-only dropper node before enabling the controller; then publish enable
-from any ROS 2 terminal on the shared domain and launch one fresh dropper node:
+Start the controller and dropper mission node while disabled; confirm the
+vision input and requested/selected motion topics first. Only after the
+Raspberry Pi receiver and actuators are ready, publish enable from a ROS 2
+terminal on the same domain:
 
 ```sh
 ros2 topic pub --once /control/enable std_msgs/msg/Bool "{data: true}"
-ros2 run auv_mission_planner dropper_mission_node
 ```

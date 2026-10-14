@@ -3,6 +3,7 @@
 import unittest
 
 from auv_vision.bin_detection import (
+    annotate_bin_detection,
     estimate_bin_detection,
     estimate_bin_pose,
 )
@@ -56,6 +57,11 @@ class TestBinDetection(unittest.TestCase):
         self.assertGreater(result['z'], 0.0)
         self.assertGreaterEqual(result['confidence'], 0.2)
         self.assertLessEqual(result['confidence'], 1.0)
+        self.assertIn(result['marker_label'], ('X', 'O'))
+
+        annotated = annotate_bin_detection(image, result)
+        self.assertEqual(annotated.shape, image.shape)
+        self.assertFalse(np.array_equal(annotated, image))
 
     def test_reports_bin_without_marker(self):
         """Keep bin visibility independent from marker visibility."""
@@ -71,6 +77,16 @@ class TestBinDetection(unittest.TestCase):
         self.assertTrue(result['detected'])
         self.assertFalse(result['marker_detected'])
         self.assertEqual(result['confidence'], 0.0)
+        self.assertEqual(result['marker_label'], 'none')
+
+    def test_visualizes_frames_without_a_bin(self):
+        """Make missing detections visible without mutating the camera frame."""
+        image = np.zeros((240, 320, 3), dtype=np.uint8)
+
+        annotated = annotate_bin_detection(image, None)
+
+        self.assertFalse(np.array_equal(annotated, image))
+        self.assertEqual(image.sum(), 0)
 
 
 if __name__ == '__main__':

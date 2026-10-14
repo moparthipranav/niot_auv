@@ -1,9 +1,11 @@
 """Integration tests for ROS mission command routing."""
 
+import struct
 import time
 import unittest
 
 from geometry_msgs.msg import Twist
+from auv_interfaces.msg import BinDetection
 
 from auv_mission_planner.buoy_task_tree import BuoyMissionNode
 from auv_mission_planner.dropper_mission_node import DropperMissionNode
@@ -15,9 +17,9 @@ import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 
-from reactive_control_layer.control_layer import ReactiveControlLayer
+from reactive_control_layer.control_layer import ReactiveControlLayer, crc8
 
-from std_msgs.msg import Bool, String, UInt8
+from std_msgs.msg import Bool, String
 
 
 class TestReactiveControlCommunication(unittest.TestCase):
@@ -33,29 +35,46 @@ class TestReactiveControlCommunication(unittest.TestCase):
         """Shut down the ROS context after the test class."""
         rclpy.shutdown()
 
-    def test_mission_commands_reach_controller(self):
-        """Forward each mission command and verify M64 conversion."""
+    def test_mission_commands_reach_controller_and_serial_output(self):
+        """Forward mission requests and verify the controller's Pi frame."""
         controller = ReactiveControlLayer()
         probe = Node('reactive_control_test_probe')
         executor = SingleThreadedExecutor()
         mission_nodes = []
         selected_commands = []
-        m64_commands = []
+
+        class RecordingSerial:
+            def __init__(self):
+                self.frames = []
+
+            def write(self, frame):
+                self.frames.append(bytes(frame))
+                return len(frame)
+
+            def close(self):
+                pass
+
+            @property
+            def in_waiting(self):
+                return 0
+
+            def read(self, size):
+                return b''
+
+        serial = RecordingSerial()
+        controller.serial_port = serial
 
         enable_publisher = probe.create_publisher(Bool, '/control/enable', 10)
         source_publisher = probe.create_publisher(
             String, '/control/select_source', 10
         )
+        bin_detection_publisher = probe.create_publisher(
+            BinDetection, '/vision/bin_detection', 10
+        )
         probe.create_subscription(
             Twist,
             '/control/selected_cmd_vel',
             selected_commands.append,
-            10,
-        )
-        probe.create_subscription(
-            UInt8,
-            '/m64/command',
-            m64_commands.append,
             10,
         )
 
@@ -81,7 +100,6 @@ class TestReactiveControlCommunication(unittest.TestCase):
                     and (
                         controller.selected_twist_pub.get_subscription_count() > 0
                     )
-                    and controller.command_pub.get_subscription_count() > 0
                 ),
             ))
             enable_publisher.publish(Bool(data=True))
@@ -124,18 +142,98 @@ class TestReactiveControlCommunication(unittest.TestCase):
                     f'{source} mission command was not forwarded',
                 )
                 if index == 1:
-                    m64_forwarded = self._spin_until(
+                    frame_forwarded = self._spin_until(
                         executor,
                         lambda: any(
-                            message.data == ord('W')
-                            for message in m64_commands
+                            frame[0:2] == b'\xaa\x55'
+                            and struct.unpack('>hhhhhhB', frame[2:15])[0] == 100
+                            and crc8(frame[2:15]) == frame[15]
+                            for frame in serial.frames
                         ),
                     )
                     self.assertTrue(
-                        m64_forwarded,
-                        'forward command was not converted to the '
-                        'M64 W command',
+                        frame_forwarded,
+                        'forward request was not encoded into a valid '
+                        'Raspberry Pi serial frame',
                     )
+
+            dropper = mission_nodes[3]
+            executor.add_node(dropper)
+            self.assertTrue(self._spin_until(
+                executor,
+                lambda: bin_detection_publisher.get_subscription_count() > 0,
+            ))
+            source_publisher.publish(String(data='dropper'))
+            self.assertTrue(self._spin_until(
+                executor,
+                lambda: controller.selected_source == 'dropper',
+            ))
+
+            detection = BinDetection()
+            detection.header.stamp = probe.get_clock().now().to_msg()
+            detection.detected = True
+            detection.marker_detected = True
+            detection.x = 0.4
+            detection.y = 0.0
+            detection.z = 0.9
+            detection.confidence = 0.9
+            bin_detection_publisher.publish(detection)
+            selected_commands.clear()
+            correction_forwarded = self._spin_until(
+                executor,
+                lambda: any(
+                    abs(message.linear.y + 0.14) < 1e-6
+                    for message in selected_commands
+                ),
+            )
+            self.assertTrue(
+                correction_forwarded,
+                'dropper alignment correction did not reach the controller',
+            )
+            correction_frame_forwarded = self._spin_until(
+                executor,
+                lambda: any(
+                    frame[0:2] == b'\xaa\x55'
+                    and struct.unpack('>hhhhhhB', frame[2:15])[1] == -140
+                    and crc8(frame[2:15]) == frame[15]
+                    for frame in serial.frames
+                ),
+            )
+            self.assertTrue(
+                correction_frame_forwarded,
+                'dropper alignment correction was not encoded into a valid '
+                'Raspberry Pi serial frame',
+            )
+
+            detection = BinDetection()
+            detection.header.stamp = probe.get_clock().now().to_msg()
+            bin_detection_publisher.publish(detection)
+            selected_commands.clear()
+            search_forwarded = self._spin_until(
+                executor,
+                lambda: any(
+                    abs(message.angular.z - 0.25) < 1e-6
+                    for message in selected_commands
+                ),
+            )
+            self.assertTrue(
+                search_forwarded,
+                'dropper fallback search command did not reach the controller',
+            )
+            search_frame_forwarded = self._spin_until(
+                executor,
+                lambda: any(
+                    frame[0:2] == b'\xaa\x55'
+                    and struct.unpack('>hhhhhhB', frame[2:15])[5] == 250
+                    and crc8(frame[2:15]) == frame[15]
+                    for frame in serial.frames
+                ),
+            )
+            self.assertTrue(
+                search_frame_forwarded,
+                'dropper search command was not encoded into a valid '
+                'Raspberry Pi serial frame',
+            )
         finally:
             executor.shutdown()
             for node in mission_nodes:

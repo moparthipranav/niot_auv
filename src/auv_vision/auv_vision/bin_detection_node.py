@@ -3,7 +3,10 @@
 import math
 
 from auv_interfaces.msg import BinDetection
-from auv_vision.bin_detection import estimate_bin_detection
+from auv_vision.bin_detection import (
+    annotate_bin_detection,
+    estimate_bin_detection,
+)
 
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
@@ -21,12 +24,21 @@ class BinDetectionNode(Node):
         self.declare_parameter('bin_width', 0.0)
         self.declare_parameter('fx', 620.5)
         self.declare_parameter('pose_topic', '/vision/bin_detection')
+        self.declare_parameter(
+            'debug_image_topic', '/vision/bin_detection/debug_image'
+        )
 
         self.bin_width = float(self.get_parameter('bin_width').value)
         self.fx = float(self.get_parameter('fx').value)
         self.bridge = CvBridge()
+        self.debug_image_topic = str(
+            self.get_parameter('debug_image_topic').value
+        )
         self.publisher = self.create_publisher(
             BinDetection, str(self.get_parameter('pose_topic').value), 10
+        )
+        self.debug_publisher = self.create_publisher(
+            Image, self.debug_image_topic, 10
         )
         self.subscription = self.create_subscription(
             Image,
@@ -41,6 +53,10 @@ class BinDetectionNode(Node):
                 'to enable range-based descent; the tree will not release '
                 'payload with an invalid range.'
             )
+        self.get_logger().info(
+            f'Publishing annotated bin detections on '
+            f"'{self.debug_image_topic}'."
+        )
 
     def image_callback(self, image_msg):
         """Publish a detection or an explicit not-detected result per frame."""
@@ -69,6 +85,18 @@ class BinDetectionNode(Node):
             result.z = float(measurement['z'])
             result.yaw = float(measurement['yaw'])
             result.confidence = float(measurement['confidence'])
+
+        try:
+            annotated_image = annotate_bin_detection(image, measurement)
+            debug_msg = self.bridge.cv2_to_imgmsg(
+                annotated_image, encoding='bgr8'
+            )
+            debug_msg.header = image_msg.header
+            self.debug_publisher.publish(debug_msg)
+        except (CvBridgeError, cv2.error) as error:
+            self.get_logger().error(
+                f'Failed to publish bin detection visualization: {error}'
+            )
 
         self.publisher.publish(result)
 

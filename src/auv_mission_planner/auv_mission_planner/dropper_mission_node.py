@@ -9,6 +9,7 @@ from auv_interfaces.msg import BinDetection
 
 from auv_mission_planner.dropper_behaviors import (
     CheckBinDetected,
+    CheckBinAligned,
     CenterBinSway,
     CenterBinSurge,
     DescendToDropAltitude,
@@ -18,7 +19,7 @@ from auv_mission_planner.dropper_behaviors import (
 )
 
 def create_dropper_tree(cmd_publisher, gripper_publisher, clock=None,
-                        max_detection_age=0.75):
+                        max_detection_age=0.75, alignment_tolerance=0.05):
     clock = clock or time.time
     # Dynamic Selector (memory=False ensures reactivity on sensor loss)
     root = py_trees.composites.Selector(name="DropperMissionRoot", memory=False)
@@ -31,14 +32,23 @@ def create_dropper_tree(cmd_publisher, gripper_publisher, clock=None,
 
     align_seq = py_trees.composites.Sequence(name="CenterOverBin", memory=False)
     center_sway = CenterBinSway(
-        cmd_publisher, deadband=0.05, clock=clock,
+        cmd_publisher, deadband=alignment_tolerance, clock=clock,
         max_age=max_detection_age, name="CenterBinSway"
     )
     center_surge = CenterBinSurge(
-        cmd_publisher, deadband=0.05, clock=clock,
+        cmd_publisher, deadband=alignment_tolerance, clock=clock,
         max_age=max_detection_age, name="CenterBinSurge"
     )
     align_seq.add_children([center_sway, center_surge])
+
+    alignment_check = CheckBinAligned(
+        tolerance=alignment_tolerance, clock=clock,
+        max_age=max_detection_age,
+    )
+    align_selector = py_trees.composites.Selector(
+        name="AlignToBin", memory=False
+    )
+    align_selector.add_children([alignment_check, align_seq])
 
     descend_alt = DescendToDropAltitude(
         cmd_publisher, target_altitude=0.40, clock=clock,
@@ -53,7 +63,7 @@ def create_dropper_tree(cmd_publisher, gripper_publisher, clock=None,
     )
 
     drop_seq.add_children(
-        [is_bin_detected, align_seq, descend_alt, wait_for_stability,
+        [is_bin_detected, align_selector, descend_alt, wait_for_stability,
          release_payload]
     )
 
@@ -84,17 +94,11 @@ class DropperMissionNode(rclpy.node.Node):
             unicode_tree_debug=True
         )
 
-        # py_trees_ros Blackboard Subscribers
-        self.bb_bin_detection = py_trees_ros.subscribers.ToBlackboard(
-            name="SubBinDetection",
-            topic_name="/vision/bin_detection",
-            topic_type=BinDetection,
-            qos_profile=qos_profile_system_default,
-            blackboard_variables={"bin_detection": None},
-            clearing_policy=py_trees.common.ClearingPolicy.NEVER
-        )
         self.blackboard = py_trees.blackboard.Client(
             name="DropperMissionNode"
+        )
+        self.blackboard.register_key(
+            key="bin_detection", access=py_trees.common.Access.WRITE
         )
         self.blackboard.register_key(
             key="vehicle_stable", access=py_trees.common.Access.WRITE
@@ -109,12 +113,21 @@ class DropperMissionNode(rclpy.node.Node):
             self.vehicle_stability_callback,
             qos_profile_system_default,
         )
+        self.bin_detection_subscription = self.create_subscription(
+            BinDetection,
+            '/vision/bin_detection',
+            self.bin_detection_callback,
+            qos_profile_system_default,
+        )
 
         self.tree.setup(timeout=15.0, node=self)
         self.timer = self.create_timer(0.1, self.tick_tree)  # 10 Hz Execution
 
     def tick_tree(self):
         self.tree.tick()
+
+    def bin_detection_callback(self, message):
+        self.blackboard.bin_detection = message
 
     def vehicle_stability_callback(self, message):
         self.blackboard.vehicle_stable = message.data

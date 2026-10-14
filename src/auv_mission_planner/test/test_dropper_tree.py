@@ -14,6 +14,7 @@ class TestDropperTreeBehaviour(unittest.TestCase):
         py_trees.blackboard.Blackboard.clear()
 
         self.last_cmd = Twist()
+        self.cmd_history = []
         self.last_gripper = Bool(data=False)
         self.gripper_history = []
 
@@ -22,6 +23,7 @@ class TestDropperTreeBehaviour(unittest.TestCase):
                 self.outer = outer
             def publish(self, msg):
                 self.outer.last_cmd = msg
+                self.outer.cmd_history.append(msg)
 
         class MockGripperPublisher:
             def __init__(self, outer):
@@ -108,6 +110,24 @@ class TestDropperTreeBehaviour(unittest.TestCase):
         self.assertEqual(self.root.status, py_trees.common.Status.RUNNING)
         self.assertAlmostEqual(self.last_cmd.linear.x, -0.09)
         self.assertAlmostEqual(self.last_cmd.linear.y, 0.0)
+
+    def test_bin_within_alignment_tolerance_skips_horizontal_commands(self):
+        """Offsets within tolerance count as aligned without perfect centering."""
+        self.set_detection(x=0.049, y=-0.05, z=0.90)
+
+        self.tree.tick()
+
+        alignment_check = self.tree.root.children[0].children[1].children[0]
+        self.assertEqual(
+            alignment_check.status, py_trees.common.Status.SUCCESS
+        )
+        self.assertIn("horizontal thruster commands are not needed",
+                      alignment_check.feedback_message)
+        self.assertTrue(all(
+            command.linear.x == 0.0 and command.linear.y == 0.0
+            for command in self.cmd_history
+        ))
+        self.assertAlmostEqual(self.last_cmd.linear.z, -0.20)
 
     def test_descent_when_centered_and_high(self):
         """Test: When fully centered in XY but high (altitude > 0.40m), vehicle descends."""

@@ -43,6 +43,43 @@ def vehicle_is_stable(blackboard, clock, max_age):
     return stable and 0 <= age <= max_age
 
 
+class CheckBinAligned(py_trees.behaviour.Behaviour):
+    """Succeed when the bin is within the accepted horizontal alignment range."""
+    def __init__(self, tolerance=0.05, clock=time.time, max_age=0.75,
+                 name="BinAligned"):
+        super().__init__(name)
+        self.tolerance = tolerance
+        self.clock = clock
+        self.max_age = max_age
+        self.blackboard = py_trees.blackboard.Client(name=self.name)
+        self.blackboard.register_key(
+            key="bin_detection", access=py_trees.common.Access.READ
+        )
+
+    def update(self):
+        detection = fresh_bin_detection(
+            self.blackboard, self.clock, self.max_age
+        )
+        if detection is None:
+            self.feedback_message = "No fresh bin detection"
+            return Status.FAILURE
+
+        norm_x = float(detection.x)
+        norm_y = float(detection.y)
+        if (abs(norm_x) <= self.tolerance
+                and abs(norm_y) <= self.tolerance):
+            self.feedback_message = (
+                f"Aligned within tolerance {self.tolerance:.2f}; "
+                "horizontal thruster commands are not needed"
+            )
+            return Status.SUCCESS
+
+        self.feedback_message = (
+            f"Outside alignment range: x={norm_x:.3f}, y={norm_y:.3f}"
+        )
+        return Status.FAILURE
+
+
 class CheckBinDetected(py_trees.behaviour.Behaviour):
     """Require a fresh bin and marker measurement before mission actions."""
     def __init__(self, clock=time.time, max_age=0.75, name="IsBinDetected"):
@@ -85,7 +122,7 @@ class CenterBinSway(py_trees.behaviour.Behaviour):
             return Status.FAILURE
 
         norm_x = float(detection.x)
-        if abs(norm_x) < self.deadband:
+        if abs(norm_x) <= self.deadband:
             return Status.SUCCESS
 
         twist = Twist()
@@ -118,7 +155,7 @@ class CenterBinSurge(py_trees.behaviour.Behaviour): # Check this behaviour as we
             return Status.FAILURE
 
         norm_y = float(detection.y)
-        if abs(norm_y) < self.deadband:
+        if abs(norm_y) <= self.deadband:
             return Status.SUCCESS
 
         twist = Twist()
@@ -162,7 +199,8 @@ class DescendToDropAltitude(py_trees.behaviour.Behaviour):
         return Status.RUNNING
 
     def terminate(self, new_status):
-        self.cmd_pub.publish(Twist())
+        if new_status != Status.INVALID:
+            self.cmd_pub.publish(Twist())
 
 
 class WaitForVehicleStable(py_trees.behaviour.Behaviour):
