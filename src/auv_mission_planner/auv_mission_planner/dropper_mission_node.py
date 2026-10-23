@@ -3,23 +3,27 @@ import rclpy
 import py_trees_ros
 import py_trees
 from rclpy.qos import qos_profile_system_default
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Twist
 from auv_interfaces.msg import BinDetection
+from py_trees.common import Status
 
 from auv_mission_planner.dropper_behaviors import (
     CheckBinDetected,
+    ConfirmBinDetection,
     CheckBinAligned,
     CenterBinSway,
     CenterBinSurge,
     DescendToDropAltitude,
     WaitForVehicleStable,
     ReleasePayloadGripper,
-    BinSearchSweep
+    BinSearchSweep,
+    WaitForBinMarker,
 )
 
 def create_dropper_tree(cmd_publisher, gripper_publisher, clock=None,
-                        max_detection_age=0.75, alignment_tolerance=0.05):
+                        max_detection_age=0.75, alignment_tolerance=0.05,
+                        detection_confirm_sec=1.0):
     clock = clock or time.time
     # Dynamic Selector (memory=False ensures reactivity on sensor loss)
     root = py_trees.composites.Selector(name="DropperMissionRoot", memory=False)
@@ -28,6 +32,10 @@ def create_dropper_tree(cmd_publisher, gripper_publisher, clock=None,
     drop_seq = py_trees.composites.Sequence(name="DropSequence", memory=False)
     is_bin_detected = CheckBinDetected(
         clock=clock, max_age=max_detection_age, name="IsBinDetected"
+    )
+    confirm_bin_detection = ConfirmBinDetection(
+        hold_time=detection_confirm_sec, clock=clock,
+        max_age=max_detection_age,
     )
 
     align_seq = py_trees.composites.Sequence(name="CenterOverBin", memory=False)
@@ -61,10 +69,13 @@ def create_dropper_tree(cmd_publisher, gripper_publisher, clock=None,
         gripper_publisher, release_hold_time=2.0, clock=clock,
         max_age=max_detection_age, name="ReleasePayloadGripper"
     )
+    wait_for_marker = WaitForBinMarker(
+        cmd_publisher, clock=clock, max_age=max_detection_age
+    )
 
     drop_seq.add_children(
-        [is_bin_detected, align_selector, descend_alt, wait_for_stability,
-         release_payload]
+        [is_bin_detected, confirm_bin_detection, align_selector,
+         wait_for_marker, descend_alt, wait_for_stability, release_payload]
     )
 
     # 2. Fallback Search Branch
@@ -78,16 +89,26 @@ def create_dropper_tree(cmd_publisher, gripper_publisher, clock=None,
 class DropperMissionNode(rclpy.node.Node):
     def __init__(self):
         super().__init__('dropper_mission_node')
+        self.declare_parameter('detection_confirm_sec', 1.0)
+        detection_confirm_sec = float(
+            self.get_parameter('detection_confirm_sec').value
+        )
 
         # Publishers
         self.cmd_pub = self.create_publisher(Twist, '/control/requests/dropper', 10)
         self.gripper_pub = self.create_publisher(Bool, '/actuators/gripper_open', 10)
+        self.task_completed_pub = self.create_publisher(
+            String, '/mission/task_completed', 10
+        )
+        self.active_task = 'idle'
+        self.task_active = False
 
         # Build Behavior Tree
         tree_root = create_dropper_tree(
             self.cmd_pub,
             self.gripper_pub,
             clock=lambda: self.get_clock().now().nanoseconds * 1e-9,
+            detection_confirm_sec=detection_confirm_sec,
         )
         self.tree = py_trees_ros.trees.BehaviourTree(
             root=tree_root,
@@ -119,12 +140,28 @@ class DropperMissionNode(rclpy.node.Node):
             self.bin_detection_callback,
             qos_profile_system_default,
         )
+        self.active_task_subscription = self.create_subscription(
+            String, '/mission/active_task', self.active_task_callback, 10
+        )
 
         self.tree.setup(timeout=15.0, node=self)
         self.timer = self.create_timer(0.1, self.tick_tree)  # 10 Hz Execution
 
     def tick_tree(self):
+        if self.active_task != 'dropper':
+            if self.task_active:
+                self.tree.root.stop(Status.INVALID)
+                self.task_active = False
+                self.gripper_pub.publish(Bool(data=False))
+            return
+
+        self.task_active = True
         self.tree.tick()
+        if self.tree.root.status == Status.SUCCESS:
+            self.task_completed_pub.publish(String(data='dropper'))
+
+    def active_task_callback(self, message):
+        self.active_task = message.data.strip().lower()
 
     def bin_detection_callback(self, message):
         self.blackboard.bin_detection = message

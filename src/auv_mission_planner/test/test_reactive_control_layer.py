@@ -68,6 +68,9 @@ class TestReactiveControlCommunication(unittest.TestCase):
         source_publisher = probe.create_publisher(
             String, '/control/select_source', 10
         )
+        active_task_publisher = probe.create_publisher(
+            String, '/mission/active_task', 10
+        )
         bin_detection_publisher = probe.create_publisher(
             BinDetection, '/vision/bin_detection', 10
         )
@@ -161,7 +164,14 @@ class TestReactiveControlCommunication(unittest.TestCase):
             executor.add_node(dropper)
             self.assertTrue(self._spin_until(
                 executor,
-                lambda: bin_detection_publisher.get_subscription_count() > 0,
+                lambda: (
+                    bin_detection_publisher.get_subscription_count() > 0
+                    and active_task_publisher.get_subscription_count() > 0
+                ),
+            ))
+            active_task_publisher.publish(String(data='dropper'))
+            self.assertTrue(self._spin_until(
+                executor, lambda: dropper.active_task == 'dropper'
             ))
             source_publisher.publish(String(data='dropper'))
             self.assertTrue(self._spin_until(
@@ -177,14 +187,19 @@ class TestReactiveControlCommunication(unittest.TestCase):
             detection.y = 0.0
             detection.z = 0.9
             detection.confidence = 0.9
-            bin_detection_publisher.publish(detection)
             selected_commands.clear()
-            correction_forwarded = self._spin_until(
-                executor,
-                lambda: any(
+
+            def publish_detection_and_check_alignment():
+                detection.header.stamp = probe.get_clock().now().to_msg()
+                bin_detection_publisher.publish(detection)
+                return any(
                     abs(message.linear.y + 0.14) < 1e-6
                     for message in selected_commands
-                ),
+                )
+
+            correction_forwarded = self._spin_until(
+                executor,
+                publish_detection_and_check_alignment,
             )
             self.assertTrue(
                 correction_forwarded,

@@ -88,7 +88,9 @@ message to `/vision/bin_detection`, including explicit `detected` and
 image offsets of the marker center (range -1 to 1), `z` is the estimated
 camera-to-bin range in metres, `yaw` is the bin's image-plane orientation in
 radians, and `confidence` is the marker classifier's vote confidence. The
-message header carries the camera measurement timestamp.
+message header carries the camera measurement timestamp. Its `z` field is a
+range measurement in metres, not a reactive-control command; vertical motion is
+sent separately as `Twist.linear.z`.
 
 Configure `bin_width` to the measured physical bin width and `fx` to the
 camera's calibrated horizontal focal length in pixels for the actual image
@@ -96,9 +98,10 @@ size. The width-based range is approximate and assumes the bin's measured
 width is visible without substantial perspective foreshortening. Range is
 zero when calibration is missing or invalid; the mission tree can still
 observe the image offsets, but will not descend or release on an invalid range.
-The tree requires both the bin and marker to be detected, a
-confidence of at least 0.2, and a measurement no older than 0.75 seconds before
-issuing alignment, descent, or release commands.
+The dropper tree requires a fresh bin detection to remain valid for one second
+before it starts alignment. It can align on the bin outline before the marker is
+classified; it holds position after alignment until the marker is detected with
+confidence of at least 0.2. Measurements must be no older than 0.75 seconds.
 After reaching the configured drop range, it also waits for a recent
 `std_msgs/msg/Bool` on `/state/vehicle_stable`; false or missing/stale
 stability data keeps the vehicle stopped and prevents payload release. The
@@ -126,6 +129,13 @@ ros2 run auv_vision bin_detection --ros-args \
 ros2 run auv_mission_planner dropper_mission_node
 ```
 
+For a standalone dropper-tree bench test without the sequencer, activate its
+task in another terminal:
+
+```sh
+ros2 topic pub --once /mission/active_task std_msgs/msg/String "{data: dropper}"
+```
+
 First observe detections and requested motion without enabling the actuators:
 
 ```sh
@@ -139,12 +149,34 @@ bin outline, marker outline/classification, and estimated offsets, range, and
 confidence. Frames where no bin is found are labeled accordingly. The image
 topic can be changed with the `debug_image_topic` parameter.
 
-The dropper tree searches when the bin or marker is not detected or the last
-measurement is stale, centers over the marker, descends to a 0.40 m measured
-range, then pulses `/actuators/gripper_open`. Release is one-shot. The tree
+The dropper tree sweeps only when the bin is not detected or its measurement is
+stale. Once the bin has been continuously detected for one second, it centers
+over the detected bin/marker location. If the marker is not yet classified, it
+holds position rather than resuming the sweep. With a confident marker and a
+valid range, it descends to a 0.40 m measured range, then pulses
+`/actuators/gripper_open`. Release is one-shot. The tree
 publishes movement requests on `/control/requests/dropper` and the release
 command on `/actuators/gripper_open`; the reactive control layer must remain
 disabled until the commands have been observed and the vehicle is secured.
+
+## Run the mission sequencer
+
+The planner installs `mission_sequencer_node` as a ROS 2 executable. Run the
+vision, navigation, reactive-control, and mission behavior nodes required by
+the selected mission in separate sourced terminals, then start the sequencer.
+For an automatic start:
+
+```sh
+ros2 run auv_mission_planner mission_sequencer_node --ros-args \
+  -p auto_start:=true
+```
+
+To wait for an explicit start command instead, omit `auto_start` and publish
+`true` once on `/mission/start`. The buoy, gate, dropper, and torpedo behavior
+nodes publish their completion on `/mission/task_completed`, which lets the
+sequencer advance after each task. The sequencer reads the bin's detected flag
+from `/vision/bin_detection`; the bin detector and dropper node must both be
+running for bin alignment and payload placement.
 
 Run the reactive control layer on the computer whose UART is physically
 connected to the Raspberry Pi (the default `/dev/ttyTHS1` is a Jetson Nano

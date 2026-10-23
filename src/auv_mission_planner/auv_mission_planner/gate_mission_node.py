@@ -2,9 +2,10 @@ import rclpy
 from rclpy.qos import qos_profile_system_default
 import py_trees
 import py_trees_ros
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Float32MultiArray
+from py_trees.common import Status
 
 from auv_mission_planner.gate_behaviors import (
     CheckGateDetected,
@@ -42,6 +43,9 @@ class GateMissionNode(rclpy.node.Node):
     def __init__(self):
         super().__init__('gate_mission_node')
         self.cmd_pub = self.create_publisher(Twist, '/control/requests/gate', 10)
+        self.task_completed_pub = self.create_publisher(
+            String, '/mission/task_completed', 10
+        )
 
         # Build py_trees_ros Behaviour Tree
         tree_root = create_gate_tree(self.cmd_pub)
@@ -74,6 +78,8 @@ class GateMissionNode(rclpy.node.Node):
 
     def tick_tree(self):
         self.tree.tick()
+        if self.tree.root.status == Status.SUCCESS:
+            self.task_completed_pub.publish(String(data='gate'))
 
 def main(args=None):
     rclpy.init(args=args)

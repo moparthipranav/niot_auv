@@ -3,7 +3,7 @@ import py_trees_ros
 import rclpy
 from rclpy.qos import qos_profile_sensor_data, qos_profile_system_default   # ROS2 jazzy requires this update to the import statement for QoS profiles.
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool, Float32MultiArray
+from std_msgs.msg import Bool, Float32MultiArray, String
 from py_trees.common import Status
 
 from auv_mission_planner.buoy_task_behaviors import (
@@ -45,6 +45,9 @@ class BuoyMissionNode(rclpy.node.Node):
 
         # Publishers
         self.cmd_pub = self.create_publisher(Twist, '/control/requests/buoy', 10)
+        self.task_completed_pub = self.create_publisher(
+            String, '/mission/task_completed', 10
+        )
 
         # Build py_trees_ros Tree
         tree_root = create_buoy_tree(self.cmd_pub)
@@ -79,5 +82,6 @@ class BuoyMissionNode(rclpy.node.Node):
         self.timer = self.create_timer(0.1, self.tick_tree)  # Create a timer to tick the behavior tree at a frequency of 10 Hz (every 0.1 seconds).
 
     def tick_tree(self):
-        self.tree.tick()  # Tick the behavior tree to update its state and execute behaviors based on the current conditions and blackboard data.
-
+        self.tree.tick()
+        if self.tree.root.status == Status.SUCCESS:
+            self.task_completed_pub.publish(String(data='buoy'))

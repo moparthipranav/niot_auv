@@ -29,6 +29,7 @@ setup(
             'buoy_mission_node = auv_mission_planner.buoy_task_tree:main',
             'dropper_mission_node = auv_mission_planner.dropper_mission_node:main',
             'torpedo_mission_node = auv_mission_planner.torpedo_tree_node:main',
+            'mission_sequencer_node = auv_mission_planner.mission_sequencer_node:main',
             'reactive_control_layer = reactive_control_layer.control_layer:main',
         ],
     },

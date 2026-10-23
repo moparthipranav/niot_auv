@@ -6,8 +6,8 @@ import math
 import time
 
 
-def fresh_bin_detection(blackboard, clock, max_age):
-    """Return a usable marker measurement, rejecting stale or invalid data."""
+def fresh_bin_detection(blackboard, clock, max_age, require_marker=False):
+    """Return a usable bin measurement, rejecting stale or invalid data."""
     try:
         detection = blackboard.bin_detection
         stamp = detection.header.stamp
@@ -25,11 +25,50 @@ def fresh_bin_detection(blackboard, clock, max_age):
 
     if (age < 0 or age > max_age
             or not all(math.isfinite(float(value)) for value in values)
-            or not detection.detected
-            or not detection.marker_detected
-            or detection.confidence < 0.2):
+            or not detection.detected):
+        return None
+    if require_marker and (
+            not detection.marker_detected or detection.confidence < 0.2):
         return None
     return detection
+
+
+class ConfirmBinDetection(py_trees.behaviour.Behaviour):
+    """Require a continuous fresh bin detection before alignment begins."""
+    def __init__(self, hold_time=1.0, clock=time.time, max_age=0.75,
+                 name="ConfirmBinDetection"):
+        super().__init__(name)
+        self.hold_time = hold_time
+        self.clock = clock
+        self.max_age = max_age
+        self.start_time = None
+        self.confirmed = False
+        self.blackboard = py_trees.blackboard.Client(name=self.name)
+        self.blackboard.register_key(
+            key="bin_detection", access=py_trees.common.Access.READ
+        )
+
+    def initialise(self):
+        if self.start_time is None:
+            self.start_time = self.clock()
+
+    def update(self):
+        detection = fresh_bin_detection(
+            self.blackboard, self.clock, self.max_age
+        )
+        if detection is None:
+            return Status.FAILURE
+        if self.confirmed:
+            return Status.SUCCESS
+        if self.clock() - self.start_time >= self.hold_time:
+            self.confirmed = True
+            return Status.SUCCESS
+        return Status.RUNNING
+
+    def terminate(self, new_status):
+        if new_status == Status.INVALID:
+            self.start_time = None
+            self.confirmed = False
 
 
 def vehicle_is_stable(blackboard, clock, max_age):
@@ -81,7 +120,7 @@ class CheckBinAligned(py_trees.behaviour.Behaviour):
 
 
 class CheckBinDetected(py_trees.behaviour.Behaviour):
-    """Require a fresh bin and marker measurement before mission actions."""
+    """Require a fresh bin measurement before mission actions."""
     def __init__(self, clock=time.time, max_age=0.75, name="IsBinDetected"):
         super().__init__(name)
         self.clock = clock
@@ -94,11 +133,37 @@ class CheckBinDetected(py_trees.behaviour.Behaviour):
     def update(self):
         return (
             Status.SUCCESS
-            if fresh_bin_detection(self.blackboard, self.clock, self.max_age)
-            
-            is not None
+            if fresh_bin_detection(
+                self.blackboard, self.clock, self.max_age
+            ) is not None
             else Status.FAILURE
         )
+
+
+class WaitForBinMarker(py_trees.behaviour.Behaviour):
+    """Hold position after alignment until a confident marker is detected."""
+    def __init__(self, cmd_publisher, clock=time.time, max_age=0.75,
+                 name="WaitForBinMarker"):
+        super().__init__(name)
+        self.cmd_pub = cmd_publisher
+        self.clock = clock
+        self.max_age = max_age
+        self.blackboard = py_trees.blackboard.Client(name=self.name)
+        self.blackboard.register_key(
+            key="bin_detection", access=py_trees.common.Access.READ
+        )
+
+    def update(self):
+        detection = fresh_bin_detection(
+            self.blackboard, self.clock, self.max_age
+        )
+        if detection is None:
+            return Status.FAILURE
+        if detection.marker_detected and detection.confidence >= 0.2:
+            return Status.SUCCESS
+        self.cmd_pub.publish(Twist())
+        return Status.RUNNING
+
 
 class CenterBinSway(py_trees.behaviour.Behaviour):
     """Action node: Regulates lateral sway (linear.y) to center over the bin horizontally"""
@@ -267,7 +332,8 @@ class ReleasePayloadGripper(py_trees.behaviour.Behaviour):
         if self.released:
             return Status.SUCCESS
         if fresh_bin_detection(
-                self.blackboard, self.clock, self.max_age) is None:
+                self.blackboard, self.clock, self.max_age,
+                require_marker=True) is None:
             self.gripper_pub.publish(Bool(data=False))
             return Status.FAILURE
         if not vehicle_is_stable(
