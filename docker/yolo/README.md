@@ -47,10 +47,46 @@ ros2 run auv_vision object_detector --ros-args \
   -p inference_host:=127.0.0.1 -p inference_port:=8765
 ```
 
-Start the appropriate existing `auv_mission_planner` node in another sourced
-terminal. The detector publishes `/vision/detections` as a `std_msgs/String`
-containing the JSON detection list, `/vision/debug_image`, and the existing
-`/vision/...` found and pose topics used by the mission planner.
+Start the control layer, buoy task node, and mission sequencer in separate
+sourced terminals:
+
+```sh
+ros2 run auv_mission_planner reactive_control_layer
+ros2 run auv_mission_planner mission_task_node --ros-args \
+  -p target_buoy_color:=red
+ros2 run auv_mission_planner mission_sequencer_node
+```
+
+The sequencer enables control and selects the `buoy` source during buoy
+interaction. `mission_task_node` waits for `/mission/active_task=buoy`, reads
+the stamped detections and depth/DVL topics, and publishes its combined request
+to `/control/requests/buoy`. The reactive control layer arbitrates that request
+and sends the selected Twist to `/control/selected_cmd_vel` and the configured
+UART. Use the existing mission-start signal to begin the sequencer; the buoy
+task node deliberately does not enable actuators by itself.
+
+After checking the vehicle is secured and the command topics are correct, start
+the sequencer with:
+
+```sh
+ros2 topic pub --once /mission/start std_msgs/msg/Bool "{data: true}"
+```
+
+The detector publishes `/vision/detections` as a `std_msgs/String` containing
+JSON with the camera `stamp`, `frame_width`, `frame_height`, and raw YOLO
+`detections` array. Each detection includes its class name, confidence, and
+bounding box. Color-specific labels such as `red_buoy`, `green_buoy`, and
+`yellow_buoy` are required; a generic `buoy` class cannot distinguish the
+three targets. If model labels differ, configure matching parameters, e.g.:
+
+```sh
+ros2 run auv_mission_planner mission_task_node --ros-args \
+  -p target_buoy_color:=red \
+  -p red_class_names:="red_target,buoy_red"
+```
+
+The task node uses `/sensors/dvl_valid` and `/sensors/dvl_velocity` for
+task-relative distance telemetry, and `/sensors/depth` for depth telemetry.
 With Docker host networking, both containers share the host network namespace;
 the ROS detector connects to the YOLO server at `127.0.0.1:8765`. The listener
 binds to `0.0.0.0:8765`.

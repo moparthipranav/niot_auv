@@ -117,7 +117,21 @@ class ObjectDetectionSubscriber(Node):
             ),
             'target': self._class_aliases(
                 self._declare_class_parameter('target_class', 'buoy'),
-                ('target_buoy',),
+                (
+                    'target_buoy',
+                    'red',
+                    'green',
+                    'yellow',
+                    'red_buoy',
+                    'green_buoy',
+                    'yellow_buoy',
+                    'buoy_red',
+                    'buoy_green',
+                    'buoy_yellow',
+                    'red buoy',
+                    'green buoy',
+                    'yellow buoy',
+                ),
             ),
             'torpedo': self._class_aliases(
                 self._declare_class_parameter('torpedo_class', 'torpedo'),
@@ -180,8 +194,18 @@ class ObjectDetectionSubscriber(Node):
         except (InferenceError, OSError, ValueError) as e:
             self.get_logger().error(f"YOLO inference server request failed: {e}")
             remote_detections = []
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1_000_000_000
         self.detections_publisher.publish(
-            String(data=json.dumps(remote_detections))
+            String(
+                data=json.dumps(
+                    {
+                        'stamp': stamp,
+                        'frame_width': int(cv_image.shape[1]),
+                        'frame_height': int(cv_image.shape[0]),
+                        'detections': remote_detections,
+                    }
+                )
+            )
         )
         detections = {}
         annotated_frame = cv_image.copy()

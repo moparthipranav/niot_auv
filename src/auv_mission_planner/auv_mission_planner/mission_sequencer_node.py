@@ -67,6 +67,8 @@ class MissionSequencerNode(Node):
         self.target_depth = float(self.get_parameter('operational_depth').value)
         self.transit_speed = float(self.get_parameter('transit_speed').value)
         self.target_buoy_color = str(self.get_parameter('target_buoy_color').value).lower()
+        if self.target_buoy_color not in ('red', 'green', 'yellow'):
+            raise ValueError('target_buoy_color must be red, green, or yellow')
         self.first_task = str(self.get_parameter('first_task_after_gate').value).lower()
         if self.first_task not in ('torpedo', 'dropper'):
             raise ValueError(
@@ -100,6 +102,9 @@ class MissionSequencerNode(Node):
         # ── Publishers ──────────────────────────────────────────────
         self.state_pub = self.create_publisher(String, '/mission/state', 10)
         self.active_task_pub = self.create_publisher(String, '/mission/active_task', 10)
+        self.buoy_color_pub = self.create_publisher(
+            String, '/mission/target_buoy_color', 10
+        )
         self.select_source_pub = self.create_publisher(String, '/control/select_source', 10)
         self.control_enable_pub = self.create_publisher(Bool, '/control/enable', 10)
         self.vision_mode_pub = self.create_publisher(String, '/vision/mode', 10)
@@ -119,6 +124,7 @@ class MissionSequencerNode(Node):
         self.create_subscription(Bool, '/mission/start', self._start_cb, 10)
         self.create_subscription(Bool, '/mission/abort', self._abort_cb, 10)
         self.create_subscription(String, '/mission/task_completed', self._task_completed_cb, 10)
+        self.create_subscription(String, '/mission/task_failed', self._task_failed_cb, 10)
 
         # Sensors & Nav
         self.create_subscription(Float32, '/sensors/depth', self._depth_cb, 10)
@@ -177,6 +183,13 @@ class MissionSequencerNode(Node):
             self.get_logger().info(f'Received task completion: {completed_task}')
         self.last_completed_task = completed_task
 
+    def _task_failed_cb(self, msg: String):
+        """Abort instead of silently timing out after an explicitly failed task."""
+        failed_task = msg.data.strip().lower()
+        if self.state == MissionState.BUOY_INTERACTION and failed_task == 'buoy':
+            self.get_logger().error('Buoy task failed; aborting the mission.')
+            self._transition_to(MissionState.ABORTED)
+
     def _depth_cb(self, msg: Float32):
         self.current_depth = msg.data
 
@@ -232,6 +245,7 @@ class MissionSequencerNode(Node):
 
         elif new_state == MissionState.BUOY_INTERACTION:
             self.select_source_pub.publish(String(data='buoy'))
+            self.buoy_color_pub.publish(String(data=self.target_buoy_color))
             self._set_active_task('buoy')
             self.vision_mode_pub.publish(String(data='buoy_full'))
 

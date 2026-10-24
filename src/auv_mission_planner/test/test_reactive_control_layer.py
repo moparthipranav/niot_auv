@@ -1,5 +1,6 @@
 """Integration tests for ROS mission command routing."""
 
+import json
 import struct
 import time
 import unittest
@@ -255,6 +256,122 @@ class TestReactiveControlCommunication(unittest.TestCase):
                 node.tree.shutdown()
                 node.destroy_node()
             controller.destroy_node()
+            probe.destroy_node()
+
+    def test_buoy_detection_command_reaches_controller(self):
+        """Turn a stamped YOLO detection into a buoy command consumed by control."""
+        controller = ReactiveControlLayer()
+        mission = BuoyMissionNode()
+        probe = Node('buoy_task_integration_probe')
+        executor = SingleThreadedExecutor()
+        selected_commands = []
+
+        class RecordingSerial:
+            def write(self, frame):
+                return len(frame)
+
+            def close(self):
+                pass
+
+            @property
+            def in_waiting(self):
+                return 0
+
+            def read(self, size):
+                return b''
+
+        controller.serial_port = RecordingSerial()
+        enable_publisher = probe.create_publisher(Bool, '/control/enable', 10)
+        source_publisher = probe.create_publisher(
+            String, '/control/select_source', 10
+        )
+        active_task_publisher = probe.create_publisher(
+            String, '/mission/active_task', 10
+        )
+        target_color_publisher = probe.create_publisher(
+            String, '/mission/target_buoy_color', 10
+        )
+        detection_publisher = probe.create_publisher(
+            String, '/vision/detections', 10
+        )
+        probe.create_subscription(
+            Twist,
+            '/control/selected_cmd_vel',
+            selected_commands.append,
+            10,
+        )
+
+        try:
+            executor.add_node(controller)
+            executor.add_node(mission)
+            executor.add_node(probe)
+            self.assertTrue(
+                self._spin_until(
+                    executor,
+                    lambda: (
+                        enable_publisher.get_subscription_count() > 0
+                        and active_task_publisher.get_subscription_count() > 0
+                        and target_color_publisher.get_subscription_count() > 0
+                        and detection_publisher.get_subscription_count() > 0
+                        and mission.cmd_pub.get_subscription_count() > 0
+                    ),
+                )
+            )
+            enable_publisher.publish(Bool(data=True))
+            source_publisher.publish(String(data='buoy'))
+            target_color_publisher.publish(String(data='red'))
+            active_task_publisher.publish(String(data='buoy'))
+            self.assertTrue(
+                self._spin_until(
+                    executor,
+                    lambda: controller.enabled
+                    and controller.selected_source == 'buoy'
+                    and mission.task_active,
+                )
+            )
+
+            stamp = probe.get_clock().now().nanoseconds / 1_000_000_000
+            detection = {
+                'stamp': stamp,
+                'frame_width': 640,
+                'frame_height': 480,
+                'detections': [
+                    {
+                        'class_name': 'red_buoy',
+                        'confidence': 0.95,
+                        'x1': 320,
+                        'y1': 200,
+                        'x2': 480,
+                        'y2': 280,
+                    },
+                    {
+                        'class_name': 'green_buoy',
+                        'confidence': 0.99,
+                        'x1': 100,
+                        'y1': 180,
+                        'x2': 260,
+                        'y2': 300,
+                    },
+                ],
+            }
+            detection_publisher.publish(String(data=json.dumps(detection)))
+
+            self.assertTrue(
+                self._spin_until(
+                    executor,
+                    lambda: any(
+                        message.angular.z < -0.1
+                        and message.linear.x > 0.1
+                        for message in selected_commands
+                    ),
+                ),
+                'red buoy servo command did not reach the control layer',
+            )
+        finally:
+            executor.shutdown()
+            mission.tree.shutdown()
+            controller.destroy_node()
+            mission.destroy_node()
             probe.destroy_node()
 
     @staticmethod
