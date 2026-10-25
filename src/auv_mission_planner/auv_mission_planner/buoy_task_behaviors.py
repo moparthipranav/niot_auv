@@ -179,9 +179,14 @@ class CenterBuoyPosition(_AxisBehaviour):
         self.sway_gain = sway_gain
         self.threshold = threshold
         self.blackboard.register_key(key="norm_x", access=py_trees.common.Access.READ)
+        self.blackboard.register_key(
+            key="contact_started", access=py_trees.common.Access.READ
+        )
 
     def update(self):
         self.stop_axes()
+        if self.blackboard.contact_started:
+            return Status.SUCCESS
         try:
             norm_x = self.blackboard.norm_x
         except KeyError:
@@ -206,12 +211,17 @@ class MatchBuoyDepth(_AxisBehaviour):
         self.threshold = threshold
         self.last_current_depth = None
         self.blackboard.register_key(key="norm_y", access=py_trees.common.Access.READ)
+        self.blackboard.register_key(
+            key="contact_started", access=py_trees.common.Access.READ
+        )
         # Keep the real depth reading available for diagnostics, but never compare it to pixel
         # error.
         self.blackboard.register_key(key="current_depth", access=py_trees.common.Access.READ)
 
     def update(self):
         self.stop_axes()
+        if self.blackboard.contact_started:
+            return Status.SUCCESS
         try:
             norm_y = self.blackboard.norm_y
         except KeyError:
@@ -243,7 +253,7 @@ class ApproachBuoy(_AxisBehaviour):
         self,
         contact_distance=0.35,
         close_threshold=0.18,
-        push_duration=2.0,
+        push_duration=4.0,
         speed_gain=1.2,
         push_speed=0.15,
         node=None,
@@ -272,12 +282,19 @@ class ApproachBuoy(_AxisBehaviour):
             "detected_color",
             "detection_stamp",
             "distance_traveled",
+            "contact_started",
         ):
-            self.blackboard.register_key(key=key, access=py_trees.common.Access.READ)
+            access = (
+                py_trees.common.Access.WRITE
+                if key == "contact_started"
+                else py_trees.common.Access.READ
+            )
+            self.blackboard.register_key(key=key, access=access)
 
     def initialise(self):
         self.push_started_at = None
         self.push_started_tick = None
+        self.blackboard.contact_started = False
 
     def _target_is_fresh(self):
         try:
@@ -304,6 +321,17 @@ class ApproachBuoy(_AxisBehaviour):
     def update(self):
         self.tick_count += 1
         self.stop_axes()
+        if self.push_started_at is not None or self.push_started_tick is not None:
+            if self.node is not None:
+                elapsed = _clock_seconds(self.node) - self.push_started_at
+            else:
+                elapsed = (self.tick_count - self.push_started_tick) * TICK_PERIOD_SEC
+            if elapsed >= self.push_duration:
+                return Status.SUCCESS
+            # Contact remains timed even if the buoy is occluded during the push.
+            _set_command(self.blackboard, "cmd_surge", self.push_speed)
+            return Status.RUNNING
+
         if not self._target_is_fresh():
             # Do not keep surging or touch based on a stale bounding box.
             return Status.RUNNING
@@ -333,21 +361,121 @@ class ApproachBuoy(_AxisBehaviour):
                 # Start a dedicated contact phase only after reaching the visual close threshold.
                 self.push_started_at = _clock_seconds(self.node) if self.node is not None else None
                 self.push_started_tick = self.tick_count
-
-            if self.node is not None:
-                elapsed = _clock_seconds(self.node) - self.push_started_at
-            else:
-                elapsed = (self.tick_count - self.push_started_tick) * TICK_PERIOD_SEC
-            if elapsed >= self.push_duration:
-                return Status.SUCCESS
+                self.blackboard.contact_started = True
             # Maintain forward contact for the configured duration, then stop in terminate().
             _set_command(self.blackboard, "cmd_surge", self.push_speed)
             return Status.RUNNING
 
-        self.push_started_at = None
-        self.push_started_tick = None
         remaining_fraction = self.close_threshold - bbox_fraction
         _set_command(self.blackboard, "cmd_surge", self.speed_gain * remaining_fraction)
+        return Status.RUNNING
+
+
+class TimedBuoyManeuver(_AxisBehaviour):
+    """Hold one bounded motion command for a fixed duration."""
+
+    def __init__(
+        self,
+        name,
+        command_key,
+        speed,
+        duration,
+        node=None,
+        tick_period=TICK_PERIOD_SEC,
+    ):
+        if command_key not in ('cmd_surge', 'cmd_sway', 'cmd_heave', 'cmd_yaw'):
+            raise ValueError('command_key must identify a supported command axis')
+        if not math.isfinite(speed):
+            raise ValueError('speed must be finite')
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError('duration must be finite and positive')
+        if not math.isfinite(tick_period) or tick_period <= 0:
+            raise ValueError('tick_period must be finite and positive')
+        super().__init__(name, (command_key,))
+        self.command_key = command_key
+        self.speed = speed
+        self.duration = duration
+        self.node = node
+        self.tick_period = tick_period
+        self.start_time = None
+        self.start_tick = 0
+        self.tick_count = 0
+
+    def initialise(self):
+        self.start_time = _clock_seconds(self.node) if self.node is not None else None
+        self.start_tick = self.tick_count
+
+    def update(self):
+        self.tick_count += 1
+        if self.node is not None:
+            elapsed = _clock_seconds(self.node) - self.start_time
+        else:
+            elapsed = (self.tick_count - self.start_tick) * self.tick_period
+        if elapsed >= self.duration:
+            return Status.SUCCESS
+        _set_command(self.blackboard, self.command_key, self.speed)
+        return Status.RUNNING
+
+
+class ExponentialHeaveManeuver(_AxisBehaviour):
+    """Increase upward heave exponentially over a bounded rise duration."""
+
+    def __init__(
+        self,
+        duration=3.0,
+        initial_speed=0.1,
+        max_speed=0.3,
+        growth=2.0,
+        node=None,
+        tick_period=TICK_PERIOD_SEC,
+        name="ExponentialHeave",
+    ):
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError("duration must be finite and positive")
+        if (
+            not math.isfinite(initial_speed)
+            or not math.isfinite(max_speed)
+            or initial_speed < 0
+            or initial_speed > max_speed
+            or max_speed > 0.3
+        ):
+            raise ValueError("heave speeds must satisfy 0 <= initial <= max <= 0.3")
+        if not math.isfinite(growth) or growth <= 0:
+            raise ValueError("growth must be finite and positive")
+        if not math.isfinite(tick_period) or tick_period <= 0:
+            raise ValueError("tick_period must be finite and positive")
+        super().__init__(name, ("cmd_heave",))
+        self.duration = duration
+        self.initial_speed = initial_speed
+        self.max_speed = max_speed
+        self.growth = growth
+        self.node = node
+        self.tick_period = tick_period
+        self.start_time = None
+        self.start_tick = 0
+        self.tick_count = 0
+
+    def initialise(self):
+        self.start_time = _clock_seconds(self.node) if self.node is not None else None
+        self.start_tick = self.tick_count
+
+    def update(self):
+        self.tick_count += 1
+        if self.node is not None:
+            elapsed = _clock_seconds(self.node) - self.start_time
+        else:
+            elapsed = (self.tick_count - self.start_tick) * self.tick_period
+        if elapsed >= self.duration:
+            return Status.SUCCESS
+
+        progress = max(0.0, min(1.0, elapsed / self.duration))
+        exponential_progress = math.expm1(self.growth * progress) / math.expm1(
+            self.growth
+        )
+        speed = self.initial_speed + (
+            self.max_speed - self.initial_speed
+        ) * exponential_progress
+        _set_command(self.blackboard, "cmd_heave", speed)
         return Status.RUNNING
 
 

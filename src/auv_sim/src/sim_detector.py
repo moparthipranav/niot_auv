@@ -33,12 +33,14 @@ class SimDetector(Node):
         self.declare_parameter("detect_all_colors", True)   # False = target colour only
         self.declare_parameter("confidence", 0.95)
         self.bridge = CvBridge()
+        self.dbg = self.create_publisher(Image, "/vision/debug_image", 1)
         self.create_subscription(
             Image, self.get_parameter("image_topic").value, self.on_image, 1)
         self.pub = self.create_publisher(String, "/vision/detections", 1)
 
     def on_image(self, msg):
         frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        frame = frame.copy()
         h, w = frame.shape[:2]
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         min_area = self.get_parameter("min_area_px").value
@@ -65,6 +67,9 @@ class SimDetector(Node):
                 "track_id": CLASS_ID[color],   # one buoy per colour -> stable id
             })
 
+            cv2.rectangle(frame, (x, y), (x + bw, y + bh), (255, 255, 255), 2)
+            cv2.putText(frame, f"{color}_buoy", (x, max(y - 6, 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
         # Stamp = "now" from the node clock (not the image header), so freshness
         # checks in the mission node see a current time.
         stamp = self.get_clock().now().nanoseconds / 1e9
@@ -74,6 +79,9 @@ class SimDetector(Node):
             "frame_height": int(h),
             "detections": detections,
         })))
+
+        cv2.line(frame, (w // 2, 0), (w // 2, h), (200, 200, 200), 1)   # image centre line
+        self.dbg.publish(self.bridge.cv2_to_imgmsg(frame, "bgr8", header=msg.header))
 
 
 def main():

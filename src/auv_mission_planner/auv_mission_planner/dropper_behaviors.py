@@ -34,10 +34,12 @@ def fresh_bin_detection(blackboard, clock, max_age, require_marker=False):
 
 
 class ConfirmBinDetection(py_trees.behaviour.Behaviour):
-    """Require a continuous fresh bin detection before alignment begins."""
-    def __init__(self, hold_time=1.0, clock=time.time, max_age=0.75,
-                 name="ConfirmBinDetection"):
+    """Require a fresh target marker before alignment begins."""
+    def __init__(self, cmd_publisher, target_marker=None, hold_time=1.0,
+                 clock=time.time, max_age=0.75, name="ConfirmBinDetection"):
         super().__init__(name)
+        self.cmd_pub = cmd_publisher
+        self.target_marker = target_marker
         self.hold_time = hold_time
         self.clock = clock
         self.max_age = max_age
@@ -56,10 +58,39 @@ class ConfirmBinDetection(py_trees.behaviour.Behaviour):
         detection = fresh_bin_detection(
             self.blackboard, self.clock, self.max_age
         )
-        if detection is None:
-            return Status.FAILURE
+        target_seen = (
+            detection is not None
+            and (
+                self.target_marker is None
+                or (
+                    detection.marker_label == self.target_marker
+                    and detection.marker_detected
+                    and detection.confidence >= 0.2
+                )
+            )
+        )
         if self.confirmed:
+            if not target_seen:
+                self.cmd_pub.publish(Twist())
+                self.feedback_message = (
+                    f"Waiting for target marker {self.target_marker}"
+                )
+                return Status.RUNNING
             return Status.SUCCESS
+        if not target_seen:
+            self.start_time = None
+            if self.confirmed:
+                self.cmd_pub.publish(Twist())
+                self.feedback_message = (
+                    f"Waiting for target marker {self.target_marker}"
+                )
+                return Status.RUNNING
+            self.feedback_message = (
+                f"Target marker {self.target_marker} lost before confirmation"
+            )
+            return Status.FAILURE
+        if self.start_time is None:
+            self.start_time = self.clock()
         if self.clock() - self.start_time >= self.hold_time:
             self.confirmed = True
             return Status.SUCCESS
@@ -121,31 +152,79 @@ class CheckBinAligned(py_trees.behaviour.Behaviour):
 
 class CheckBinDetected(py_trees.behaviour.Behaviour):
     """Require a fresh bin measurement before mission actions."""
-    def __init__(self, clock=time.time, max_age=0.75, name="IsBinDetected"):
+    def __init__(self, clock=time.time, max_age=0.75, latch_on_detection=False,
+                 name="IsBinDetected"):
         super().__init__(name)
         self.clock = clock
         self.max_age = max_age
+        self.latch_on_detection = latch_on_detection
+        self.detected_once = False
         self.blackboard = py_trees.blackboard.Client(name=self.name)
         self.blackboard.register_key(
             key="bin_detection", access=py_trees.common.Access.READ
         )
 
     def update(self):
-        return (
-            Status.SUCCESS
-            if fresh_bin_detection(
-                self.blackboard, self.clock, self.max_age
-            ) is not None
-            else Status.FAILURE
+        detected = fresh_bin_detection(
+            self.blackboard, self.clock, self.max_age
+        ) is not None
+        if detected and self.latch_on_detection:
+            self.detected_once = True
+        if detected or (self.latch_on_detection and self.detected_once):
+            return Status.SUCCESS
+        return Status.FAILURE
+
+    def terminate(self, new_status):
+        if new_status == Status.INVALID:
+            self.detected_once = False
+
+
+class CheckTargetBin(py_trees.behaviour.Behaviour):
+    """Latch acquisition only after the requested marker is identified."""
+    def __init__(self, target_marker, clock=time.time, max_age=0.75,
+                 name="IsTargetBinDetected"):
+        super().__init__(name)
+        self.target_marker = target_marker
+        self.clock = clock
+        self.max_age = max_age
+        self.target_acquired = False
+        self.blackboard = py_trees.blackboard.Client(name=self.name)
+        self.blackboard.register_key(
+            key="bin_detection", access=py_trees.common.Access.READ
         )
+
+    def update(self):
+        detection = fresh_bin_detection(
+            self.blackboard, self.clock, self.max_age
+        )
+        if (
+            detection is not None
+            and (
+                self.target_marker is None
+                or (
+                    detection.marker_detected
+                    and detection.marker_label == self.target_marker
+                    and detection.confidence >= 0.2
+                )
+            )
+        ):
+            self.target_acquired = True
+        if self.target_acquired:
+            return Status.SUCCESS
+        return Status.FAILURE
+
+    def terminate(self, new_status):
+        if new_status == Status.INVALID:
+            self.target_acquired = False
 
 
 class WaitForBinMarker(py_trees.behaviour.Behaviour):
     """Hold position after alignment until a confident marker is detected."""
-    def __init__(self, cmd_publisher, clock=time.time, max_age=0.75,
+    def __init__(self, cmd_publisher, target_marker=None, clock=time.time, max_age=0.75,
                  name="WaitForBinMarker"):
         super().__init__(name)
         self.cmd_pub = cmd_publisher
+        self.target_marker = target_marker
         self.clock = clock
         self.max_age = max_age
         self.blackboard = py_trees.blackboard.Client(name=self.name)
@@ -158,10 +237,23 @@ class WaitForBinMarker(py_trees.behaviour.Behaviour):
             self.blackboard, self.clock, self.max_age
         )
         if detection is None:
-            return Status.FAILURE
-        if detection.marker_detected and detection.confidence >= 0.2:
+            self.cmd_pub.publish(Twist())
+            self.feedback_message = "Waiting for fresh bin detection"
+            return Status.RUNNING
+        if (
+            detection.marker_detected
+            and detection.confidence >= 0.2
+            and (
+                self.target_marker is None
+                or detection.marker_label == self.target_marker
+            )
+        ):
             return Status.SUCCESS
         self.cmd_pub.publish(Twist())
+        if self.target_marker is not None:
+            self.feedback_message = (
+                f"Waiting for target marker {self.target_marker}"
+            )
         return Status.RUNNING
 
 
@@ -184,7 +276,8 @@ class CenterBinSway(py_trees.behaviour.Behaviour):
             self.blackboard, self.clock, self.max_age
         )
         if detection is None:
-            return Status.FAILURE
+            self.cmd_pub.publish(Twist())
+            return Status.RUNNING
 
         norm_x = float(detection.x)
         if abs(norm_x) <= self.deadband:
@@ -217,7 +310,8 @@ class CenterBinSurge(py_trees.behaviour.Behaviour): # Check this behaviour as we
             self.blackboard, self.clock, self.max_age
         )
         if detection is None:
-            return Status.FAILURE
+            self.cmd_pub.publish(Twist())
+            return Status.RUNNING
 
         norm_y = float(detection.y)
         if abs(norm_y) <= self.deadband:
@@ -250,11 +344,14 @@ class DescendToDropAltitude(py_trees.behaviour.Behaviour):
             self.blackboard, self.clock, self.max_age
         )
         if detection is None:
-            return Status.FAILURE
+            self.cmd_pub.publish(Twist())
+            return Status.RUNNING
 
         current_altitude = float(detection.z)
         if current_altitude <= 0:
-            return Status.FAILURE
+            self.cmd_pub.publish(Twist())
+            self.feedback_message = "Waiting for a valid bin range"
+            return Status.RUNNING
         if current_altitude <= self.target_altitude:
             return Status.SUCCESS
 
@@ -301,11 +398,13 @@ class WaitForVehicleStable(py_trees.behaviour.Behaviour):
 
 class ReleasePayloadGripper(py_trees.behaviour.Behaviour):
     """Action node: Sends release signal to gripper actuator. (please clarify the gripper mechanism)"""
-    def __init__(self, gripper_publisher, release_hold_time=2.0,
-                 clock=time.time, max_age=0.75,
+    def __init__(self, cmd_publisher, gripper_publisher, target_marker=None,
+                 release_hold_time=2.0, clock=time.time, max_age=0.75,
                  name="ReleasePayloadGripper"):
         super().__init__(name)
+        self.cmd_pub = cmd_publisher
         self.gripper_pub = gripper_publisher
+        self.target_marker = target_marker
         self.release_hold_time = release_hold_time
         self.clock = clock
         self.max_age = max_age
@@ -335,11 +434,32 @@ class ReleasePayloadGripper(py_trees.behaviour.Behaviour):
                 self.blackboard, self.clock, self.max_age,
                 require_marker=True) is None:
             self.gripper_pub.publish(Bool(data=False))
-            return Status.FAILURE
+            self.cmd_pub.publish(Twist())
+            self.start_time = None
+            self.feedback_message = "Waiting for fresh bin marker"
+            return Status.RUNNING
+        detection = fresh_bin_detection(
+            self.blackboard, self.clock, self.max_age,
+            require_marker=True,
+        )
+        if (
+            self.target_marker is not None
+            and detection.marker_label != self.target_marker
+        ):
+            self.gripper_pub.publish(Bool(data=False))
+            self.cmd_pub.publish(Twist())
+            self.start_time = None
+            self.feedback_message = (
+                f"Waiting for target marker {self.target_marker}"
+            )
+            return Status.RUNNING
         if not vehicle_is_stable(
                 self.blackboard, self.clock, self.max_age):
             self.gripper_pub.publish(Bool(data=False))
-            return Status.FAILURE
+            self.cmd_pub.publish(Twist())
+            self.start_time = None
+            self.feedback_message = "Waiting for stable vehicle"
+            return Status.RUNNING
         if self.start_time is None:
             self.start_time = self.clock()
             self.gripper_pub.publish(Bool(data=True))
@@ -356,24 +476,52 @@ class ReleasePayloadGripper(py_trees.behaviour.Behaviour):
         self.gripper_pub.publish(Bool(data=False))
 
 class BinSearchSweep(py_trees.behaviour.Behaviour):
-    """Action node: Rotational search pattern to find the bin using the bottom camera to locate the bin."""
-    def __init__(self, cmd_publisher, timeout_sec=25.0, name="BinSearchSweep"):
+    """Search expanding square legs until the requested bin is acquired."""
+    def __init__(self, cmd_publisher, clock=time.time, forward_speed=0.12,
+                 turn_speed=0.25, initial_leg_duration=4.0,
+                 name="BinSearchSweep"):
         super().__init__(name)
         self.cmd_pub = cmd_publisher
-        self.timeout = timeout_sec
-        self.start_time = None
+        self.clock = clock
+        self.forward_speed = forward_speed
+        self.turn_speed = turn_speed
+        self.initial_leg_duration = initial_leg_duration
+        self.phase_start = None
+        self.phase = "forward"
+        self.leg_duration = initial_leg_duration
+        self.legs_at_duration = 0
 
     def initialise(self):
-        self.start_time = time.time()
+        if self.phase_start is None:
+            self.phase_start = self.clock()
 
     def update(self):
-        if (time.time() - self.start_time) > self.timeout:
-            return Status.FAILURE # Search timed out
-
+        elapsed = self.clock() - self.phase_start
         twist = Twist()
-        twist.angular.z = 0.25 # Rotational scan rate
+        if self.phase == "forward":
+            if elapsed + 1e-9 >= self.leg_duration:
+                self.phase = "turn"
+                self.phase_start = self.clock()
+                self.legs_at_duration += 1
+                if self.legs_at_duration == 2:
+                    self.legs_at_duration = 0
+                    self.leg_duration += self.initial_leg_duration
+                return Status.RUNNING
+            twist.linear.x = self.forward_speed
+        else:
+            turn_duration = (math.pi / 2) / self.turn_speed
+            if elapsed + 1e-9 >= turn_duration:
+                self.phase = "forward"
+                self.phase_start = self.clock()
+                return Status.RUNNING
+            twist.angular.z = self.turn_speed
         self.cmd_pub.publish(twist)
         return Status.RUNNING
 
     def terminate(self, new_status):
         self.cmd_pub.publish(Twist())
+        if new_status == Status.INVALID:
+            self.phase_start = None
+            self.phase = "forward"
+            self.leg_duration = self.initial_leg_duration
+            self.legs_at_duration = 0

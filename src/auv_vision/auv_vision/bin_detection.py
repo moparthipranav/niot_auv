@@ -12,8 +12,8 @@ import numpy as np
 
 
 # ---------------------------------------------------------------- bin ----
-def detect_bin(img):
-    """Return (contour, mask) of the white bin, or (None, None)."""
+def detect_bins(img):
+    """Return individual white bin contours and masks in the image."""
     blur = cv2.GaussianBlur(img, (7, 7), 0)
     hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
 
@@ -25,28 +25,47 @@ def detect_bin(img):
         return None, None
     t, _ = cv2.threshold(v[low_sat].reshape(-1, 1), 0, 255,
                          cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    brightness_threshold = max(int(t * 0.55), 65)
     mask = (
-        ((s < 70) & (v > max(t, 120))).astype(np.uint8) * 255
+        ((s < 80) & (v > brightness_threshold)).astype(np.uint8) * 255
     )
 
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (5, 5)
+    )
+    open_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (3, 3)
+    )
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel)
 
     cnts, _ = cv2.findContours(
         mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
-    if not cnts:
-        return None, None
-    c = max(cnts, key=cv2.contourArea)
     image_area = img.shape[0] * img.shape[1]
-    if cv2.contourArea(c) < 0.03 * image_area:
-        return None, None
+    candidates = []
+    for contour in cnts:
+        if cv2.contourArea(contour) < 0.006 * image_area:
+            continue
+        hull = cv2.convexHull(contour)
+        _, _, width, height = cv2.boundingRect(hull)
+        if min(width, height) == 0:
+            continue
+        aspect_ratio = width / height
+        if not 0.45 <= aspect_ratio <= 2.2:
+            continue
+        filled = np.zeros_like(mask)
+        cv2.drawContours(filled, [hull], -1, 255, -1)
+        candidates.append((hull, filled))
+    return sorted(
+        candidates, key=lambda item: cv2.contourArea(item[0]), reverse=True
+    )
 
-    hull = cv2.convexHull(c)            # fills notches caused by the red tape
-    filled = np.zeros_like(mask)
-    cv2.drawContours(filled, [hull], -1, 255, -1)
-    return hull, filled
+
+def detect_bin(img):
+    """Return the largest white bin contour and mask, or (None, None)."""
+    candidates = detect_bins(img)
+    return candidates[0] if candidates else (None, None)
 
 
 def estimate_bin_pose(img, real_bin_width, fx):
@@ -73,28 +92,63 @@ def estimate_bin_pose(img, real_bin_width, fx):
     return norm_x, norm_y, range_m, bin_hull
 
 
-def estimate_bin_detection(img, real_bin_width, fx):
-    """Return the bin and marker measurements used by the mission."""
-    bin_hull, bin_mask = detect_bin(img)
-    if bin_hull is None:
+def estimate_bin_detection(img, real_bin_width, fx, target_marker=None):
+    """Measure the requested bin, classifying each visible bin separately."""
+    bins = detect_bins(img)
+    if not bins:
         return None
 
     image_height, image_width = img.shape[:2]
-    x, y, width_pixels, height_pixels = cv2.boundingRect(bin_hull)
-    center_x = x + width_pixels / 2.0
-    center_y = y + height_pixels / 2.0
-    norm_x = (center_x - image_width / 2.0) / (image_width / 2.0)
-    norm_y = (center_y - image_height / 2.0) / (image_height / 2.0)
+    measurements = []
+    for bin_hull, bin_mask in bins:
+        _, _, width_pixels, _ = cv2.boundingRect(bin_hull)
+        if width_pixels <= 0:
+            continue
+        marker_mask = red_mask(img, bin_mask)
+        label, info, marker_hull = classify_marker(marker_mask)
+        confidence = info.get('confidence', 0.0)
+        measurements.append({
+            'bin_hull': bin_hull,
+            'marker_hull': marker_hull,
+            'marker_label': label,
+            'confidence': confidence,
+            'width_pixels': width_pixels,
+            'area': cv2.contourArea(bin_hull),
+        })
+    if not measurements:
+        return None
 
+    target_marker = (
+        target_marker.strip().upper()
+        if isinstance(target_marker, str) else None
+    )
+    matching = [
+        item for item in measurements
+        if item['marker_label'] == target_marker
+    ] if target_marker in ('X', 'O') else []
+    selected = max(
+        matching or measurements,
+        key=lambda item: (
+            item['confidence'],
+            item['area'],
+        ),
+    )
+    bin_hull = selected['bin_hull']
+    marker_hull = selected['marker_hull']
+    label = selected['marker_label']
+    width_pixels = selected['width_pixels']
+
+    x, y, _, _ = cv2.boundingRect(bin_hull)
+    center_x = x + cv2.boundingRect(bin_hull)[2] / 2.0
+    center_y = y + cv2.boundingRect(bin_hull)[3] / 2.0
     range_m = 0.0
     if (math.isfinite(real_bin_width) and real_bin_width > 0
-            and math.isfinite(fx) and fx > 0 and width_pixels > 0):
+            and math.isfinite(fx) and fx > 0):
         range_m = fx * real_bin_width / width_pixels
-
-    marker_mask = red_mask(img, bin_mask)
-    label, info, marker_hull = classify_marker(marker_mask)
+    norm_x = (center_x - image_width / 2.0) / (image_width / 2.0)
+    norm_y = (center_y - image_height / 2.0) / (image_height / 2.0)
     yaw = math.radians(cv2.minAreaRect(bin_hull)[-1])
-    confidence = 0.0
+    confidence = selected['confidence']
     if marker_hull is not None:
         moments = cv2.moments(marker_hull)
         if moments['m00'] > 0:
@@ -102,7 +156,6 @@ def estimate_bin_detection(img, real_bin_width, fx):
             center_y = moments['m01'] / moments['m00']
             norm_x = (center_x - image_width / 2.0) / (image_width / 2.0)
             norm_y = (center_y - image_height / 2.0) / (image_height / 2.0)
-            confidence = info['confidence']
 
     return {
         'detected': True,
@@ -115,16 +168,27 @@ def estimate_bin_detection(img, real_bin_width, fx):
         'confidence': confidence,
         'bin_hull': bin_hull,
         'marker_hull': marker_hull,
+        'bin_candidates': measurements,
     }
 
 
-def annotate_bin_detection(img, measurement):
+def annotate_bin_detection(img, measurement, target_marker=None):
     """Return a copy of the image with the current bin detection overlaid."""
     annotated = img.copy()
     if measurement is None:
         status = 'Bin: NOT DETECTED'
         details = ''
     else:
+        for candidate in measurement.get('bin_candidates', []):
+            if candidate['bin_hull'] is not measurement['bin_hull']:
+                cv2.drawContours(
+                    annotated, [candidate['bin_hull']], -1, (120, 180, 0), 1
+                )
+                if candidate['marker_hull'] is not None:
+                    cv2.drawContours(
+                        annotated, [candidate['marker_hull']], -1,
+                        (0, 120, 255), 1
+                    )
         bin_hull = measurement['bin_hull']
         marker_hull = measurement['marker_hull']
         cv2.drawContours(annotated, [bin_hull], -1, (0, 255, 0), 2)
@@ -138,6 +202,12 @@ def annotate_bin_detection(img, measurement):
         marker_label = measurement['marker_label']
         if marker_label in ('X', 'O'):
             status = f'Bin: DETECTED | Marker: {marker_label}'
+            if target_marker in ('X', 'O'):
+                status += (
+                    f' | TARGET {target_marker}'
+                    if marker_label == target_marker
+                    else f' | NOT TARGET {target_marker}'
+                )
         else:
             status = 'Bin: DETECTED | Marker: NOT DETECTED'
         details = (
@@ -145,6 +215,8 @@ def annotate_bin_detection(img, measurement):
             f"range: {measurement['z']:.2f} m  "
             f"confidence: {measurement['confidence']:.2f}"
         )
+    if measurement is None and target_marker in ('X', 'O'):
+        status += f' | TARGET {target_marker}'
 
     cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 54), (0, 0, 0), -1)
     cv2.putText(
@@ -179,7 +251,14 @@ def red_mask(img, bin_mask):
     m = (m & hue_ok.astype(np.uint8)) * 255
 
     # Stay away from bin edges (orange zip-ties, rope sit on the rim)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+    ys, xs = np.where(bin_mask > 0)
+    if len(xs) == 0:
+        return np.zeros_like(bin_mask)
+    bin_size = min(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1)
+    erosion_size = min(25, max(3, int(bin_size * 0.12) | 1))
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (erosion_size, erosion_size)
+    )
     safe = cv2.erode(bin_mask, kernel)
     m = cv2.bitwise_and(m, safe)
 
@@ -199,7 +278,7 @@ def classify_marker(mask):
         return 'none', {}, None
 
     # Merge all sizeable blobs (tape can be broken into pieces) into one shape
-    min_area = 0.002 * mask.size
+    min_area = max(16, 0.0008 * mask.size)
     big = [c for c in cnts if cv2.contourArea(c) > min_area]
     if not big:
         return 'none', {}, None

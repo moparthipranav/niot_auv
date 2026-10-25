@@ -23,6 +23,7 @@ class BinDetectionNode(Node):
         self.declare_parameter('image_topic', '/camera/image_raw')
         self.declare_parameter('bin_width', 0.0)
         self.declare_parameter('fx', 620.5)
+        self.declare_parameter('target_marker', 'X')
         self.declare_parameter('pose_topic', '/vision/bin_detection')
         self.declare_parameter(
             'debug_image_topic', '/vision/bin_detection/debug_image'
@@ -30,6 +31,11 @@ class BinDetectionNode(Node):
 
         self.bin_width = float(self.get_parameter('bin_width').value)
         self.fx = float(self.get_parameter('fx').value)
+        self.target_marker = str(
+            self.get_parameter('target_marker').value
+        ).strip().upper()
+        if self.target_marker not in ('X', 'O'):
+            raise ValueError("target_marker must be either 'X' or 'O'")
         self.bridge = CvBridge()
         self.debug_image_topic = str(
             self.get_parameter('debug_image_topic').value
@@ -70,7 +76,8 @@ class BinDetectionNode(Node):
                 image_msg, desired_encoding='bgr8'
             )
             measurement = estimate_bin_detection(
-                image, self.bin_width, self.fx
+                image, self.bin_width, self.fx,
+                target_marker=self.target_marker,
             )
         except (CvBridgeError, cv2.error) as error:
             self.get_logger().error(f'Bin detection failed for camera frame: {error}')
@@ -80,6 +87,7 @@ class BinDetectionNode(Node):
         if measurement is not None:
             result.detected = measurement['detected']
             result.marker_detected = measurement['marker_detected']
+            result.marker_label = measurement['marker_label']
             result.x = float(measurement['x'])
             result.y = float(measurement['y'])
             result.z = float(measurement['z'])
@@ -87,7 +95,9 @@ class BinDetectionNode(Node):
             result.confidence = float(measurement['confidence'])
 
         try:
-            annotated_image = annotate_bin_detection(image, measurement)
+            annotated_image = annotate_bin_detection(
+                image, measurement, target_marker=self.target_marker
+            )
             debug_msg = self.bridge.cv2_to_imgmsg(
                 annotated_image, encoding='bgr8'
             )

@@ -2,6 +2,7 @@ std_msgs/Header header
 
 bool detected
 bool marker_detected
+string marker_label
 
 # Normalized image offsets (-1..1), estimated camera-to-bin range (m),
 # and image-plane orientation (rad).

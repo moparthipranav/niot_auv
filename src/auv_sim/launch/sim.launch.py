@@ -1,7 +1,6 @@
 """Gazebo + bridge + sim_detector + your buoy_mission_node + reactive_control_layer.
 
-  ros2 launch auv_sim sim.launch.py target_color:=red
-  ros2 launch auv_sim sim.launch.py target_color:=green fake_sensors:=true
+  ros2 launch auv_sim sim.launch.py target_color:=green
 """
 import os
 from ament_index_python.packages import get_package_share_directory
@@ -73,7 +72,7 @@ def generate_launch_description():
     ]
 
     return LaunchDescription([
-        DeclareLaunchArgument("target_color", default_value="red"),
+        DeclareLaunchArgument("target_color", default_value="green"),
         DeclareLaunchArgument("active_task", default_value="buoy"),
         DeclareLaunchArgument("select_source", default_value="buoy"),
         DeclareLaunchArgument("fake_sensors", default_value="false"),

@@ -38,7 +38,8 @@ class TestDropperTreeBehaviour(unittest.TestCase):
 
         self.root = create_dropper_tree(
             self.cmd_pub, self.gripper_pub, clock=lambda: self.now,
-            detection_confirm_sec=0.0,
+            detection_confirm_sec=0.0, drop_altitude=0.40,
+            target_marker='X',
         )
         self.tree = py_trees.trees.BehaviourTree(self.root)
 
@@ -55,7 +56,8 @@ class TestDropperTreeBehaviour(unittest.TestCase):
         )
 
     def set_detection(self, x=0.01, y=0.01, z=1.0, age=0.0,
-                      detected=True, marker_detected=True):
+                      detected=True, marker_detected=True,
+                      marker_label='X'):
         detection = BinDetection()
         timestamp = self.now - age
         detection.header.stamp.sec = int(timestamp)
@@ -64,6 +66,7 @@ class TestDropperTreeBehaviour(unittest.TestCase):
         )
         detection.detected = detected
         detection.marker_detected = marker_detected
+        detection.marker_label = marker_label if marker_detected else 'none'
         detection.x = x
         detection.y = y
         detection.z = z
@@ -81,21 +84,22 @@ class TestDropperTreeBehaviour(unittest.TestCase):
         py_trees.blackboard.Blackboard.clear()
 
     def test_search_fallback_when_bin_not_found(self):
-        """Test: When bin is not detected, vehicle executes search yaw sweep."""
+        """Search moves the vehicle when the requested bin is not visible."""
         self.set_detection(detected=False, marker_detected=False)
 
         self.tree.tick()
 
         self.assertEqual(self.root.status, py_trees.common.Status.RUNNING)
-        self.assertAlmostEqual(self.last_cmd.angular.z, 0.25)
-        self.assertAlmostEqual(self.last_cmd.linear.x, 0.0)
+        self.assertAlmostEqual(self.last_cmd.linear.x, 0.12)
+        self.assertAlmostEqual(self.last_cmd.angular.z, 0.0)
         self.assertFalse(self.last_gripper.data)
 
     def test_detection_must_persist_before_aligning_without_marker(self):
         """A stable bin detection starts alignment before marker detection."""
         self.root = create_dropper_tree(
             self.cmd_pub, self.gripper_pub, clock=lambda: self.now,
-            detection_confirm_sec=1.0,
+            detection_confirm_sec=1.0, drop_altitude=0.40,
+            target_marker=None,
         )
         self.tree = py_trees.trees.BehaviourTree(self.root)
         self.set_detection(x=0.4, y=0.0, z=2.5, marker_detected=False)
@@ -168,6 +172,43 @@ class TestDropperTreeBehaviour(unittest.TestCase):
         self.assertAlmostEqual(self.last_cmd.linear.z, -0.20)
         self.assertFalse(self.last_gripper.data)
 
+    def test_drop_altitude_cap_holds_camera_visible_height(self):
+        root = create_dropper_tree(
+            self.cmd_pub, self.gripper_pub, clock=lambda: self.now,
+            detection_confirm_sec=0.0, drop_altitude=1.0,
+            target_marker='X',
+        )
+        tree = py_trees.trees.BehaviourTree(root)
+        self.set_detection(z=0.90)
+
+        tree.tick()
+
+        self.assertTrue(self.last_gripper.data)
+        self.assertEqual(self.last_cmd, Twist())
+
+        self.set_detection(z=1.10)
+        tree.tick()
+        self.assertAlmostEqual(self.last_cmd.linear.z, -0.20)
+
+    def test_temporary_detection_loss_after_alignment_holds_in_drop_sequence(self):
+        self.set_detection(z=0.90)
+        self.tree.tick()
+        self.assertAlmostEqual(self.last_cmd.linear.z, -0.20)
+
+        self.set_detection(detected=False, marker_detected=False)
+        self.tree.tick()
+
+        search_node = self.root.children[1].children[0]
+        self.assertEqual(self.root.status, py_trees.common.Status.RUNNING)
+        self.assertEqual(search_node.status, py_trees.common.Status.INVALID)
+        self.assertEqual(self.last_cmd, Twist())
+        self.assertFalse(self.last_gripper.data)
+
+        self.set_detection(z=0.80)
+        self.tree.tick()
+        self.assertAlmostEqual(self.last_cmd.linear.z, -0.20)
+        self.assertEqual(search_node.status, py_trees.common.Status.INVALID)
+
     def test_realigns_when_marker_moves_during_descent(self):
         self.set_detection(z=0.90)
         self.tree.tick()
@@ -190,13 +231,18 @@ class TestDropperTreeBehaviour(unittest.TestCase):
         self.assertTrue(self.last_gripper.data)
 
     def test_invalid_range_does_not_release_gripper(self):
-        """A missing/invalid range must not trigger a payload release."""
+        """An invalid range must hold position rather than restarting search."""
         self.set_detection(z=0.0)
 
         self.tree.tick()
 
+        self.assertEqual(self.root.status, py_trees.common.Status.RUNNING)
+        self.assertEqual(self.last_cmd, Twist())
         self.assertFalse(self.last_gripper.data)
-        self.assertAlmostEqual(self.last_cmd.angular.z, 0.25)
+        self.assertEqual(
+            self.root.children[1].children[0].status,
+            py_trees.common.Status.INVALID,
+        )
 
     def test_payload_release_is_one_shot(self):
         self.set_detection(z=0.35)
@@ -247,28 +293,38 @@ class TestDropperTreeBehaviour(unittest.TestCase):
 
         self.assertFalse(self.last_gripper.data)
 
-    def test_search_timeout_triggers_failure(self):
-        """Test: If search sweep exceeds timeout limit, it returns FAILURE."""
+    def test_search_expands_its_square_after_two_legs(self):
         self.set_detection(detected=False, marker_detected=False)
         self.tree.tick()
 
         search_node = self.tree.root.children[1].children[0]
-        search_node.start_time -= 30.0  # Force timeout expiration
-
+        self.now += 4.0
         self.tree.tick()
+        self.assertEqual(search_node.phase, 'turn')
 
-        self.assertEqual(search_node.status, py_trees.common.Status.FAILURE)
+        self.now += (3.141592653589793 / 2) / 0.25 + 0.01
+        self.tree.tick()
+        self.assertEqual(search_node.phase, 'forward')
+        self.now += 4.0
+        self.tree.tick()
+        self.assertEqual(search_node.leg_duration, 8.0)
 
     def test_stale_detection_cannot_drive_or_release(self):
         self.set_detection(x=0.4, z=0.35, age=2.0)
 
         self.tree.tick()
 
-        self.assertAlmostEqual(self.last_cmd.angular.z, 0.25)
+        self.assertAlmostEqual(self.last_cmd.linear.x, 0.12)
         self.assertAlmostEqual(self.last_cmd.linear.y, 0.0)
         self.assertFalse(self.last_gripper.data)
 
     def test_bin_without_marker_aligns_but_does_not_release(self):
+        self.root = create_dropper_tree(
+            self.cmd_pub, self.gripper_pub, clock=lambda: self.now,
+            detection_confirm_sec=0.0, drop_altitude=0.40,
+            target_marker=None,
+        )
+        self.tree = py_trees.trees.BehaviourTree(self.root)
         self.set_detection(x=0.4, z=0.35, marker_detected=False)
 
         self.tree.tick()
@@ -277,6 +333,64 @@ class TestDropperTreeBehaviour(unittest.TestCase):
         self.assertAlmostEqual(self.last_cmd.linear.y, -0.14)
         self.assertAlmostEqual(self.last_cmd.linear.z, 0.0)
         self.assertFalse(self.last_gripper.data)
+
+    def test_wrong_marker_is_never_selected_or_released(self):
+        self.set_detection(marker_label='O')
+
+        self.tree.tick()
+
+        self.assertAlmostEqual(self.last_cmd.linear.x, 0.12)
+        self.assertEqual(
+            self.root.children[0].children[0].status,
+            py_trees.common.Status.FAILURE,
+        )
+        self.assertFalse(self.last_gripper.data)
+
+    def test_wrong_marker_during_confirmation_resumes_search(self):
+        root = create_dropper_tree(
+            self.cmd_pub, self.gripper_pub, clock=lambda: self.now,
+            detection_confirm_sec=1.0, target_marker='X',
+        )
+        tree = py_trees.trees.BehaviourTree(root)
+
+        self.set_detection(marker_label='X')
+        tree.tick()
+        self.assertEqual(root.children[0].status, py_trees.common.Status.RUNNING)
+
+        self.set_detection(marker_label='O')
+        tree.tick()
+
+        confirm_node = root.children[0].children[1]
+        search_node = root.children[1].children[0]
+        self.assertEqual(confirm_node.status, py_trees.common.Status.FAILURE)
+        self.assertEqual(search_node.status, py_trees.common.Status.RUNNING)
+        self.assertAlmostEqual(self.last_cmd.linear.x, 0.12)
+        self.assertFalse(self.last_gripper.data)
+
+    def test_search_stops_only_after_requested_marker_is_acquired(self):
+        self.set_detection(marker_label='O')
+        self.tree.tick()
+        self.assertAlmostEqual(self.last_cmd.linear.x, 0.12)
+
+        self.set_detection(marker_label='X')
+        self.tree.tick()
+
+        self.assertEqual(
+            self.root.children[0].children[0].status,
+            py_trees.common.Status.SUCCESS,
+        )
+        self.assertEqual(
+            self.root.children[1].children[0].status,
+            py_trees.common.Status.INVALID,
+        )
+        self.assertFalse(self.last_gripper.data)
+
+    def test_invalid_target_marker_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "target_marker"):
+            create_dropper_tree(
+                self.cmd_pub, self.gripper_pub,
+                clock=lambda: self.now, target_marker='circle',
+            )
 
 if __name__ == '__main__':
     unittest.main()

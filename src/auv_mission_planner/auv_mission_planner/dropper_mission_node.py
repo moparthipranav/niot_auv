@@ -9,7 +9,7 @@ from auv_interfaces.msg import BinDetection
 from py_trees.common import Status
 
 from auv_mission_planner.dropper_behaviors import (
-    CheckBinDetected,
+    CheckTargetBin,
     ConfirmBinDetection,
     CheckBinAligned,
     CenterBinSway,
@@ -23,17 +23,23 @@ from auv_mission_planner.dropper_behaviors import (
 
 def create_dropper_tree(cmd_publisher, gripper_publisher, clock=None,
                         max_detection_age=0.75, alignment_tolerance=0.05,
-                        detection_confirm_sec=1.0):
+                        detection_confirm_sec=1.0, drop_altitude=1.0,
+                        target_marker='X'):
     clock = clock or time.time
+    if target_marker is not None:
+        target_marker = target_marker.strip().upper()
+        if target_marker not in ('X', 'O'):
+            raise ValueError("target_marker must be either 'X' or 'O'")
     # Dynamic Selector (memory=False ensures reactivity on sensor loss)
     root = py_trees.composites.Selector(name="DropperMissionRoot", memory=False)
 
     # 1. Main Drop Sequence
     drop_seq = py_trees.composites.Sequence(name="DropSequence", memory=False)
-    is_bin_detected = CheckBinDetected(
-        clock=clock, max_age=max_detection_age, name="IsBinDetected"
+    is_target_bin_detected = CheckTargetBin(
+        target_marker, clock=clock, max_age=max_detection_age,
     )
     confirm_bin_detection = ConfirmBinDetection(
+        cmd_publisher, target_marker=target_marker,
         hold_time=detection_confirm_sec, clock=clock,
         max_age=max_detection_age,
     )
@@ -59,28 +65,32 @@ def create_dropper_tree(cmd_publisher, gripper_publisher, clock=None,
     align_selector.add_children([alignment_check, align_seq])
 
     descend_alt = DescendToDropAltitude(
-        cmd_publisher, target_altitude=0.40, clock=clock,
+        cmd_publisher, target_altitude=drop_altitude, clock=clock,
         max_age=max_detection_age, name="DescendToDropAltitude"
     )
     wait_for_stability = WaitForVehicleStable(
         cmd_publisher, clock=clock, max_age=max_detection_age
     )
     release_payload = ReleasePayloadGripper(
-        gripper_publisher, release_hold_time=2.0, clock=clock,
+        cmd_publisher, gripper_publisher, target_marker=target_marker,
+        release_hold_time=2.0, clock=clock,
         max_age=max_detection_age, name="ReleasePayloadGripper"
     )
     wait_for_marker = WaitForBinMarker(
-        cmd_publisher, clock=clock, max_age=max_detection_age
+        cmd_publisher, target_marker=target_marker,
+        clock=clock, max_age=max_detection_age
     )
 
     drop_seq.add_children(
-        [is_bin_detected, confirm_bin_detection, align_selector,
+        [is_target_bin_detected, confirm_bin_detection, align_selector,
          wait_for_marker, descend_alt, wait_for_stability, release_payload]
     )
 
     # 2. Fallback Search Branch
     search_seq = py_trees.composites.Sequence(name="SearchPhaseRoot", memory=True)
-    search_sweep = BinSearchSweep(cmd_publisher, timeout_sec=25.0, name="BinSearchSweep")
+    search_sweep = BinSearchSweep(
+        cmd_publisher, clock=clock, name="BinSearchSweep"
+    )
     search_seq.add_children([search_sweep])
 
     root.add_children([drop_seq, search_seq])
@@ -90,9 +100,13 @@ class DropperMissionNode(rclpy.node.Node):
     def __init__(self):
         super().__init__('dropper_mission_node')
         self.declare_parameter('detection_confirm_sec', 1.0)
+        self.declare_parameter('drop_altitude', 1.0)
+        self.declare_parameter('target_marker', 'X')
         detection_confirm_sec = float(
             self.get_parameter('detection_confirm_sec').value
         )
+        drop_altitude = float(self.get_parameter('drop_altitude').value)
+        target_marker = str(self.get_parameter('target_marker').value)
 
         # Publishers
         self.cmd_pub = self.create_publisher(Twist, '/control/requests/dropper', 10)
@@ -109,6 +123,8 @@ class DropperMissionNode(rclpy.node.Node):
             self.gripper_pub,
             clock=lambda: self.get_clock().now().nanoseconds * 1e-9,
             detection_confirm_sec=detection_confirm_sec,
+            drop_altitude=drop_altitude,
+            target_marker=target_marker,
         )
         self.tree = py_trees_ros.trees.BehaviourTree(
             root=tree_root,
